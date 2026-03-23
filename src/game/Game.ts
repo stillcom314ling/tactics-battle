@@ -18,6 +18,7 @@ import * as ROT from 'rot-js';
 import { ParallaxAsciiRenderer } from '../rendering/ParallaxAsciiRenderer';
 import { CameraController } from '../rendering/CameraController';
 import { World, Position, Renderable, Health, Faction, Combat, Ability, Abilities, StatusEffect } from '../core/ECS';
+import { TooltipOverlay } from '../ui/TooltipOverlay';
 import { generateMap, populateWorld, GeneratedMap } from './MapGenerator';
 import { processInteractions } from '../core/InteractionSystem';
 import { resolveSpell, getRangeTiles, tickCooldowns } from './SpellSystem';
@@ -67,6 +68,7 @@ export class Game {
   private uiLayer!: Container; // fixed overlay (not in parallax)
 
   private wheel!: RadialWheel;
+  private tooltip!: TooltipOverlay;
 
   constructor(private container: HTMLElement) {}
 
@@ -120,6 +122,7 @@ export class Game {
     this.setupHUD();
     this.setupFAB();
     this.setupWheel();
+    this.setupTooltip();
     this.setupInput();
 
     this.addMessage('Hold ⚡ and drag to select an action.');
@@ -193,6 +196,7 @@ export class Game {
     this.fabGfx.on('pointerdown', (e) => {
       e.stopPropagation();
       if (this.phase !== 'player' || this.mode !== 'free') return;
+      this.tooltip.hide();
       this.wheel.open(
         this.buildWheelNodes(),
         this.app.screen.width  / 2,
@@ -224,6 +228,11 @@ export class Game {
   private setupWheel() {
     this.wheel = new RadialWheel();
     this.uiLayer.addChild(this.wheel.container);
+  }
+
+  private setupTooltip() {
+    this.tooltip = new TooltipOverlay();
+    this.uiLayer.addChild(this.tooltip.container);
   }
 
   private buildWheelNodes(): WheelNode[] {
@@ -380,6 +389,7 @@ export class Game {
     const playerPos = this.world.getComponent<Position>(this.playerId, 'position')!;
 
     if (this.mode === 'targeting') {
+      this.tooltip.hide();
       // Tap own tile = cancel
       if (col === playerPos.col && row === playerPos.row) {
         this.cancelTargeting();
@@ -400,15 +410,23 @@ export class Game {
       return;
     }
 
-    // free mode
-    // Tap enemy directly → do nothing (no bump attack)
-    const enemy = this.getActorAt(col, row, 'enemy');
-    if (enemy !== null) {
-      this.addMessage('Open the wheel to select a spell first.');
+    // free mode — tap own tile → inspect self
+    if (col === playerPos.col && row === playerPos.row) {
+      const sw = this.app.screen.width, sh = this.app.screen.height;
+      this.tooltip.show(this.world, this.playerId, screenX, screenY, sw, sh);
       return;
     }
 
-    // Tap floor → pathfind & move one step
+    // Tap enemy → inspect (tooltip), not attack
+    const enemy = this.getActorAt(col, row, 'enemy');
+    if (enemy !== null) {
+      const sw = this.app.screen.width, sh = this.app.screen.height;
+      this.tooltip.show(this.world, enemy, screenX, screenY, sw, sh);
+      return;
+    }
+
+    // Tap floor → hide tooltip, pathfind & move one step
+    this.tooltip.hide();
     if (!this.mapData.walkable[row]?.[col]) return;
     const path = this.findPath(playerPos.col, playerPos.row, col, row, this.playerId);
     if (path.length < 2) return;

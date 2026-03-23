@@ -10,7 +10,7 @@
  */
 
 import * as ROT from 'rot-js';
-import { World, Position, Renderable, Terrain, Health, Faction, StatusEffect, Movement, Combat, Abilities } from '../core/ECS';
+import { World, Position, Renderable, Terrain, Health, Faction, StatusEffect, Movement, Combat, Abilities, Label } from '../core/ECS';
 import { AsciiCell } from '../rendering/ParallaxAsciiRenderer';
 import { makeFlameBolt, makeArcLightning, makeFrostShard } from './SpellSystem';
 
@@ -181,6 +181,7 @@ export function populateWorld(
   world.addComponent(playerId, { type: 'movement', range: 5, canFly: false } as Movement);
   world.addComponent(playerId, { type: 'combat', attackPower: 15, defense: 5, attackRange: 1 } as Combat);
   world.addComponent(playerId, { type: 'abilities', list: [makeFlameBolt(), makeArcLightning(), makeFrostShard()] } as Abilities);
+  world.addComponent(playerId, { type: 'label', name: 'Hero' } as Label);
 
   // Place some enemies
   const enemyCount = 4 + Math.floor(Math.random() * 4);
@@ -188,6 +189,7 @@ export function populateWorld(
     const pos = floorPositions.pop()!;
     const enemyId = world.createEntity();
     const enemyChar = pick(['g', 'o', 'k', 's', 'r']);
+    const enemyName: Record<string, string> = { g: 'Goblin', o: 'Orc', k: 'Kobold', s: 'Skeleton', r: 'Rat' };
     const enemyColor = pick([0xff4444, 0xff6644, 0xee5533, 0xcc3322]);
 
     world.addComponent(enemyId, { type: 'position', col: pos.col, row: pos.row, layer: 'gameplay' } as Position);
@@ -197,6 +199,7 @@ export function populateWorld(
     world.addComponent(enemyId, { type: 'status', effects: new Set() } as StatusEffect);
     world.addComponent(enemyId, { type: 'movement', range: 3, canFly: false } as Movement);
     world.addComponent(enemyId, { type: 'combat', attackPower: 8, defense: 3, attackRange: 1 } as Combat);
+    world.addComponent(enemyId, { type: 'label', name: enemyName[enemyChar] ?? 'Monster' } as Label);
   }
 
   return { playerId, floorPositions };

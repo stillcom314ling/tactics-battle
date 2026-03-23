@@ -94,6 +94,12 @@ export interface Abilities extends Component {
   list: Ability[];
 }
 
+// --- LABEL ---
+export interface Label extends Component {
+  type: 'label';
+  name: string;
+}
+
 // ---------- THE WORLD ----------
 
 export class World {
