@@ -23,9 +23,9 @@ import { processInteractions } from '../core/InteractionSystem';
 import { resolveSpell, getRangeTiles, tickCooldowns } from './SpellSystem';
 import { RadialWheel, WheelNode } from '../ui/RadialWheel';
 
-const MAP_W     = 48;
-const MAP_H     = 32;
-const CELL_SIZE = 16;
+const MAP_W     = 32;
+const MAP_H     = 22;
+const CELL_SIZE = 24;
 
 // Element → highlight colour for targeting mode
 const ELEMENT_COLOR: Record<string, number> = {
@@ -55,6 +55,9 @@ export class Game {
 
   private turnCount: number = 0;
   private messages: string[] = [];
+
+  private wheelDragging   = false;
+  private wheelJustClosed = false;
 
   private hudText!: Text;
   private msgText!: Text;
@@ -119,7 +122,7 @@ export class Game {
     this.setupWheel();
     this.setupInput();
 
-    this.addMessage('Tap ⚡ or tap yourself to open the action wheel.');
+    this.addMessage('Hold ⚡ and drag to select an action.');
     this.addMessage('Tap a floor tile to move.');
   }
 
@@ -183,15 +186,30 @@ export class Game {
 
   private setupFAB() {
     this.fabGfx = new Graphics();
-    this.fabGfx.circle(0, 0, 32).fill({ color: 0x223355, alpha: 0.9 }).stroke({ color: 0x4477cc, alpha: 0.8, width: 2 });
+    this.fabGfx.circle(0, 0, 34).fill({ color: 0x112244, alpha: 0.92 }).stroke({ color: 0x3366bb, alpha: 0.85, width: 2.5 });
     this.fabGfx.eventMode = 'static';
     this.fabGfx.cursor    = 'pointer';
     this.fabGfx.on('pointerdown', (e) => {
       e.stopPropagation();
-      this.openWheel();
+      if (this.phase !== 'player' || this.mode !== 'free') return;
+      this.wheel.open(
+        this.buildWheelNodes(),
+        this.fabGfx.x,
+        this.fabGfx.y,
+        () => {
+          // Prevent the canvas click/tap that fires after pointerup from
+          // being misread as a map tap.
+          this.wheelJustClosed = true;
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            this.wheelJustClosed = false;
+          }));
+        },
+      );
+      this.wheelDragging    = true;
+      this.camera.disabled  = true;
     });
 
-    const style = new TextStyle({ fontFamily: '"Courier New", monospace', fontSize: 20, fill: 0x88bbff, fontWeight: 'bold' });
+    const style = new TextStyle({ fontFamily: '"Courier New", monospace', fontSize: 22, fill: 0x6699ff, fontWeight: 'bold' });
     this.fabLabel = new Text({ text: '⚡', style });
     this.fabLabel.anchor.set(0.5);
     this.fabLabel.eventMode = 'none';
@@ -205,13 +223,6 @@ export class Game {
   private setupWheel() {
     this.wheel = new RadialWheel();
     this.uiLayer.addChild(this.wheel.container);
-  }
-
-  private openWheel() {
-    if (this.phase !== 'player' || this.mode !== 'free') return;
-    const cx = this.app.screen.width  / 2;
-    const cy = this.app.screen.height / 2;
-    this.wheel.open(this.buildWheelNodes(), cx, cy);
   }
 
   private buildWheelNodes(): WheelNode[] {
@@ -307,11 +318,31 @@ export class Game {
 
   private setupInput() {
     const canvas = this.app.canvas as HTMLCanvasElement;
+    const toCanvas = (clientX: number, clientY: number) => {
+      const rect  = canvas.getBoundingClientRect();
+      const scale = this.app.screen.width / rect.width;
+      return [(clientX - rect.left) * scale, (clientY - rect.top) * scale] as const;
+    };
 
+    // ── Wheel drag: window-level so pointer can leave the FAB ──────────
+    window.addEventListener('pointermove', (e) => {
+      if (!this.wheelDragging) return;
+      const [x, y] = toCanvas(e.clientX, e.clientY);
+      this.wheel.update(x, y);
+    });
+
+    window.addEventListener('pointerup', () => {
+      if (!this.wheelDragging) return;
+      this.wheel.commit();
+      this.wheelDragging   = false;
+      this.camera.disabled = false;
+    });
+
+    // ── Map taps (move / cast) ─────────────────────────────────────────
     canvas.addEventListener('click', (e) => {
-      if (this.camera.hasDragged) return;
-      const rect = canvas.getBoundingClientRect();
-      this.handleTap(e.clientX - rect.left, e.clientY - rect.top);
+      if (this.camera.hasDragged || this.wheelJustClosed) return;
+      const [x, y] = toCanvas(e.clientX, e.clientY);
+      this.handleTap(x, y);
     });
 
     let touchStartX = 0, touchStartY = 0;
@@ -321,11 +352,11 @@ export class Game {
     }, { passive: true });
 
     canvas.addEventListener('touchend', (e) => {
-      if (this.camera.hasDragged) return;
+      if (this.camera.hasDragged || this.wheelJustClosed) return;
       const t = e.changedTouches[0];
       if (Math.hypot(t.clientX - touchStartX, t.clientY - touchStartY) > 8) return;
-      const rect = canvas.getBoundingClientRect();
-      this.handleTap(t.clientX - rect.left, t.clientY - rect.top);
+      const [x, y] = toCanvas(t.clientX, t.clientY);
+      this.handleTap(x, y);
     }, { passive: true });
   }
 
@@ -338,7 +369,6 @@ export class Game {
   }
 
   private handleTap(screenX: number, screenY: number) {
-    if (this.wheel.isOpen) return;
     if (this.phase === 'game_over') return;
     if (this.phase !== 'player') return;
 
@@ -369,12 +399,6 @@ export class Game {
     }
 
     // free mode
-    // Tap own tile → open wheel
-    if (col === playerPos.col && row === playerPos.row) {
-      this.openWheel();
-      return;
-    }
-
     // Tap enemy directly → do nothing (no bump attack)
     const enemy = this.getActorAt(col, row, 'enemy');
     if (enemy !== null) {
