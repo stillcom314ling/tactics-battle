@@ -1,0 +1,19 @@
+{
+  "name": "ascii-tactics",
+  "version": "0.1.0",
+  "description": "Tactical ASCII combat game with parallax depth rendering",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "pixi.js": "^8.6.6",
+    "rot-js": "^2.3.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0"
+  }
+}
