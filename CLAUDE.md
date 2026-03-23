@@ -24,8 +24,107 @@ src/
   game/
     Game.ts                   # Top-level orchestrator, game loop
     MapGenerator.ts           # rot.js dungeon generation → ECS entities + render layers
+    SpellSystem.ts            # Spell resolution, range geometry, cooldowns
     RenderSystem.ts           # Syncs ECS state to parallax renderer each frame
+  ui/
+    RadialWheel.ts            # Drag-to-select action wheel (spells, wait)
+    TooltipOverlay.ts         # Tap-to-inspect panel: name, HP bar, status effects
 ```
+
+## Current State (what is already built)
+
+### Core loop — fully playable
+- **Movement** — tap any floor tile, A* pathfinding moves player one step per turn
+- **Turn flow** — player acts → enemies move/attack → environment ticks → repeat
+- **Enemy AI** — enemies pathfind toward player; melee strike when adjacent
+- **Death** — player HP reaches 0 → game_over phase, refresh to restart
+
+### Spell system
+Three starter spells on a cooldown system:
+| Spell | Element | Pattern | Damage | Effects |
+|---|---|---|---|---|
+| Flame Bolt | fire | single | 8 | burning |
+| Arc Lightning | lightning | line | 6 | shocked |
+| Frost Shard | ice | single | 5 | wet, slowed |
+
+Patterns: `single`, `line`, `aoe`, `self` — adding new spells is one object literal.
+Cooldowns tick each full turn. `InteractionSystem.ts` handles synergy rules (wet+lightning = bonus damage, etc.).
+
+### UI
+- **Radial wheel** — hold ⚡ FAB and drag to select action; opens at screen center
+- **Targeting mode** — spell selected → range tiles highlight in element colour, enemy glyphs tint to spell colour; tap to cast, tap own tile to cancel
+- **Tooltip overlay** — tap any entity to inspect: name, animated HP bar (green→yellow→red), active status effects in their element colour
+- **HUD** — HP, turn counter, enemy count, phase indicator, log of last 3 messages
+- **Portrait-aware** — font sizes and FAB scaled for mobile; mode hint wraps to screen width
+
+### ECS Components in use
+`position`, `renderable`, `health`, `faction`, `status`, `movement`, `combat`, `abilities`, `terrain`, `label`
+
+---
+
+## What to build next — design discussion
+
+These are the most impactful directions. Discuss with a new chat to choose focus.
+
+### 1. FOV / Fog of War
+**What:** Use `rot.js PreciseShadowcasting` to track which tiles the player can see. Unseen tiles are hidden or dimmed; previously-seen tiles are shown at reduced brightness ("memory").
+**Why:** Immediately makes exploration tense and meaningful. Enemies feel threatening once hidden.
+**How:** Add a `fov: Set<string>` to game state, recompute each turn from player position. In `RenderSystem`/`drawActors`, skip or dim entities outside FOV. Dim gameplay layer cells outside FOV using `setCell` alpha override.
+**Complexity:** Medium — rot.js does the hard part, rendering wiring is straightforward.
+
+### 2. More enemy variety
+**What:** Different enemy types with distinct stats and behaviours:
+- *Archer* (`a`) — stays at range 3, shoots in a line (reuse line spell pattern)
+- *Brute* (`B`) — high HP/attack, slow (1 step per 2 turns)
+- *Mage* (`m`) — casts AoE fire at player position from distance
+- *Swarmer* (`z`) — weak solo, spawns in groups of 3–4, fast
+
+**Why:** Single enemy type gets boring fast. Variety forces spell choices.
+**How:** Add optional `ai` component with `strategy: 'ranged'|'brute'|'swarm'|'caster'`. Branch in `processEnemyTurns` on strategy.
+**Complexity:** Low–Medium per type.
+
+### 3. Items on the ground
+**What:** Potions, scrolls, and gear dropped on floor tiles. Player steps on tile to pick up; items go to a simple inventory (no UI needed — just apply effect immediately or queue it).
+**Starter items:**
+- Health Potion — restore 25 HP
+- Scroll of Fireball — one-use AoE 8 damage, range 5
+- Boots of Speed — +1 movement range permanently
+
+**Why:** Gives a reason to explore; creates risk/reward (go get the potion or play it safe).
+**How:** Add `item` component with `{ kind, effect }`. In `moveEntity`, check if destination tile has an item entity and auto-collect. Add to wheel as "Use Item" submenu.
+**Complexity:** Low.
+
+### 4. Win condition + dungeon progression
+**What:** Kill all enemies on the floor → "FLOOR CLEAR" message → staircase tile (`>`) appears → step on it to descend to a harder generated floor.
+**Progression hooks:** each floor scales enemy count, max HP, and attack. Player keeps HP and abilities between floors.
+**Why:** Without a goal the game has no arc.
+**How:** Track kill count, check against starting enemy count. `generateMap` already returns a new map; reset enemies, re-place player, keep components.
+**Complexity:** Low–Medium.
+
+### 5. Spell crafting / unlock tree
+**What:** Killing enemies drops "essence" of their element. Collect enough → unlock new spells or upgrade existing ones (e.g. Flame Bolt → Inferno: AoE pattern, higher damage).
+**Upgrade ideas:**
+- Range +1, damage +3, add second effect, reduce cooldown by 1
+- New spells: Poison Cloud (AoE, applies poisoned), Chain Lightning (bounces 2 times), Ice Nova (AoE slowed + wet)
+
+**Why:** The spell system is already clean and extensible — crafting gives it long-term depth without new systems.
+**How:** Add `essence` resource to player. Show essence count in HUD. Add "Upgrade" submenu to radial wheel. Mutations are just property changes on `Ability` objects.
+**Complexity:** Medium.
+
+### 6. Spell/hit visual feedback
+**What:** When a spell fires, flash the affected tiles with the element colour for 2–3 frames. Enemies briefly flash white on hit. Screen nudge (tiny shake) on taking damage.
+**Why:** Currently combat is silent and instant — feedback makes hits feel impactful.
+**How:** Add a `VFXQueue` of `{ tiles, color, framesLeft }` entries. Process queue in the game loop, calling `setCell` with tinted alpha; restore terrain when framesLeft hits 0.
+**Complexity:** Low.
+
+### 7. Persistent high score / floor tracking
+**What:** On game over, save `{ floor, kills, turnsAlive }` to `localStorage`. Show on death screen.
+**Why:** Tiny feature, big motivation to replay.
+**Complexity:** Very low.
+
+---
+
+## Design Goals
 
 ## Key Concepts
 
@@ -66,16 +165,15 @@ Test on your phone by opening the GitHub Pages URL.
 
 ## Development with Claude Code
 
-This project is designed for iterative development with Claude Code. Good next tasks:
+This project is designed for iterative development with Claude Code. See the **What to build next** section above for detailed design notes on each option. Quick priority order:
 
-1. **Implement player movement** — click/tap a floor tile to move the @ there (use rot.js A* pathfinding)
-2. **Add FOV** — use rot.js PreciseShadowcasting so unseen areas are dimmed
-3. **Wire up turn flow** — player moves, then enemies move toward player using Dijkstra maps
-4. **Add combat** — bump into enemies to attack, process interaction rules on hit
-5. **Add UI overlay** — health bar, turn indicator, action buttons for mobile
-6. **Add more interaction rules** — poison, freeze, chain lightning, etc.
-7. **AI-assisted ASCII art** — use an LLM to generate ASCII creature/terrain designs, import as layer data
-8. **Add depth variation per-character** — slightly randomize character sizes by layer for more organic depth feel
+1. **FOV / fog of war** — biggest gameplay impact, rot.js does the heavy lifting
+2. **Enemy variety** — archers, brutes, mages; branch on `ai.strategy` in `processEnemyTurns`
+3. **Items on the ground** — potions/scrolls, auto-collect on step, instant effect
+4. **Win condition + floor descent** — kill all enemies, staircase spawns, scale next floor
+5. **Spell VFX** — tile flash + enemy hit flash via a lightweight `VFXQueue` in the game loop
+6. **Spell upgrades** — essence drops from kills, spend to mutate `Ability` objects
+7. **High score in localStorage** — floor/kills/turns on death screen, trivial to add
 
 ## Design Goals
 
