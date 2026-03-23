@@ -19,6 +19,8 @@ export class CameraController {
   public state: CameraState = { x: 0, y: 0, velocityX: 0, velocityY: 0 };
   /** True if the last pointer-down moved enough to count as a drag (not a tap). */
   public hasDragged = false;
+  /** Suspend all camera input (e.g. while radial wheel is active). */
+  public disabled = false;
 
   private isDragging = false;
   private startPointerX = 0;
@@ -53,6 +55,7 @@ export class CameraController {
   }
 
   private onPointerDown(x: number, y: number) {
+    if (this.disabled) return;
     this.isDragging = true;
     this.hasDragged = false;
     this.startPointerX = x;
@@ -64,7 +67,7 @@ export class CameraController {
   }
 
   private onPointerMove(x: number, y: number) {
-    if (!this.isDragging) return;
+    if (this.disabled || !this.isDragging) return;
 
     const dx = x - this.lastPointerX;
     const dy = y - this.lastPointerY;

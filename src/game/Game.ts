@@ -1,32 +1,44 @@
 /**
  * GAME
  *
- * Top-level orchestrator. Initializes PixiJS, the parallax renderer,
- * the ECS world, map generation, and the game loop.
+ * Top-level orchestrator. Initialises PixiJS, parallax renderer, ECS world,
+ * map generation, and the game loop.
  *
- * Architecture overview:
- *   index.html -> main.ts -> Game.init() -> Game.start()
+ * Turn flow: player acts via radial wheel → enemy phase → environment ticks → repeat
+ * No bump-to-attack. All combat is explicit through the spell system.
  *
- *   Rendering:  ParallaxAsciiRenderer (multiple depth layers of ASCII)
- *               CameraController (pan with mouse/touch, inertia)
- *
- *   Game logic: World (ECS - entities, components)
- *               MapGenerator (rot.js dungeon generation)
- *               Inline turn loop: player clicks → enemy AI → repeat
+ * Game modes:
+ *   free      — player can move or open wheel
+ *   targeting — spell selected, tap tile to cast (tap own tile to cancel)
+ *   game_over — display only
  */
 
-import { Application, Text, TextStyle } from 'pixi.js';
+import { Application, Text, TextStyle, Graphics, Container } from 'pixi.js';
 import * as ROT from 'rot-js';
 import { ParallaxAsciiRenderer } from '../rendering/ParallaxAsciiRenderer';
 import { CameraController } from '../rendering/CameraController';
-import { World, Position, Renderable, Health, Faction, Combat } from '../core/ECS';
+import { World, Position, Renderable, Health, Faction, Combat, Ability, Abilities, StatusEffect } from '../core/ECS';
+import { TooltipOverlay } from '../ui/TooltipOverlay';
 import { generateMap, populateWorld, GeneratedMap } from './MapGenerator';
+import { processInteractions } from '../core/InteractionSystem';
+import { resolveSpell, getRangeTiles, tickCooldowns } from './SpellSystem';
+import { RadialWheel, WheelNode } from '../ui/RadialWheel';
 
-// Map dimensions
-const MAP_W = 48;
-const MAP_H = 32;
-const CELL_SIZE = 16;
+const MAP_W     = 32;
+const MAP_H     = 22;
+const CELL_SIZE = 24;
 
+// Element → highlight colour for targeting mode
+const ELEMENT_COLOR: Record<string, number> = {
+  fire:      0xff5500,
+  lightning: 0xffee00,
+  ice:       0x44ccff,
+  poison:    0x88ff44,
+  arcane:    0xcc44ff,
+  none:      0xffffff,
+};
+
+type GameMode  = 'free' | 'targeting';
 type GamePhase = 'player' | 'enemy' | 'game_over';
 
 export class Game {
@@ -37,17 +49,32 @@ export class Game {
   private playerId!: number;
   private mapData!: GeneratedMap;
 
-  private phase: GamePhase = 'player';
+  private phase: GamePhase  = 'player';
+  private mode:  GameMode   = 'free';
+  private selectedAbility: Ability | null = null;
+  private highlightTiles: [number, number][] = [];
+
   private turnCount: number = 0;
   private messages: string[] = [];
 
+  private wheelDragging   = false;
+  private wheelJustClosed = false;
+
   private hudText!: Text;
   private msgText!: Text;
+  private modeText!: Text;   // shows current mode / targeting hint
+  private fabGfx!: Graphics; // floating action button
+  private fabLabel!: Text;
+  private uiLayer!: Container; // fixed overlay (not in parallax)
+
+  private wheel!: RadialWheel;
+  private tooltip!: TooltipOverlay;
 
   constructor(private container: HTMLElement) {}
 
+  // ─── INIT ──────────────────────────────────────────────────────────────────
+
   async init() {
-    // --- PixiJS ---
     this.app = new Application();
     await this.app.init({
       resizeTo: this.container,
@@ -58,63 +85,29 @@ export class Game {
     });
     this.container.appendChild(this.app.canvas);
 
-    // --- Camera ---
     this.camera = new CameraController(this.app.canvas as HTMLElement);
 
-    // --- Parallax Renderer ---
     this.renderer = new ParallaxAsciiRenderer();
     this.app.stage.addChild(this.renderer.root);
 
-    // Add depth layers (far -> near)
+    // Parallax layers (far → near)
     const bgScale = 1.4;
-    this.renderer.addLayer({
-      id: 'bg_far',
-      depth: 0.2,
-      cols: Math.ceil(MAP_W * bgScale),
-      rows: Math.ceil(MAP_H * bgScale),
-      cellSize: CELL_SIZE,
-      alpha: 0.4,
-      tint: 0x8888aa,
-    });
-    this.renderer.addLayer({
-      id: 'bg_mid',
-      depth: 0.5,
-      cols: Math.ceil(MAP_W * bgScale),
-      rows: Math.ceil(MAP_H * bgScale),
-      cellSize: CELL_SIZE,
-      alpha: 0.5,
-      tint: 0x9999bb,
-    });
-    this.renderer.addLayer({
-      id: 'gameplay',
-      depth: 1.0,
-      cols: MAP_W,
-      rows: MAP_H,
-      cellSize: CELL_SIZE,
-      alpha: 1.0,
-    });
-    this.renderer.addLayer({
-      id: 'foreground',
-      depth: 1.3,
-      cols: Math.ceil(MAP_W * 1.2),
-      rows: Math.ceil(MAP_H * 1.2),
-      cellSize: CELL_SIZE,
-      alpha: 0.3,
-    });
+    this.renderer.addLayer({ id: 'bg_far',    depth: 0.2, cols: Math.ceil(MAP_W * bgScale), rows: Math.ceil(MAP_H * bgScale), cellSize: CELL_SIZE, alpha: 0.4, tint: 0x8888aa });
+    this.renderer.addLayer({ id: 'bg_mid',    depth: 0.5, cols: Math.ceil(MAP_W * bgScale), rows: Math.ceil(MAP_H * bgScale), cellSize: CELL_SIZE, alpha: 0.5, tint: 0x9999bb });
+    this.renderer.addLayer({ id: 'gameplay',  depth: 1.0, cols: MAP_W,                       rows: MAP_H,                       cellSize: CELL_SIZE, alpha: 1.0 });
+    this.renderer.addLayer({ id: 'foreground',depth: 1.3, cols: Math.ceil(MAP_W * 1.2),      rows: Math.ceil(MAP_H * 1.2),      cellSize: CELL_SIZE, alpha: 0.3 });
 
-    // --- ECS World & Map ---
-    this.world = new World();
+    // World + map
+    this.world   = new World();
     this.mapData = generateMap(MAP_W, MAP_H);
 
-    this.renderer.setLayerData('bg_far', this.mapData.bgFar);
-    this.renderer.setLayerData('bg_mid', this.mapData.bgMid);
+    this.renderer.setLayerData('bg_far',     this.mapData.bgFar);
+    this.renderer.setLayerData('bg_mid',     this.mapData.bgMid);
     this.renderer.setLayerData('foreground', this.mapData.foreground);
-    this.renderer.setLayerData('gameplay', this.mapData.gameplay);
+    this.renderer.setLayerData('gameplay',   this.mapData.gameplay);
 
     const { playerId } = populateWorld(this.world, this.mapData);
     this.playerId = playerId;
-
-    // Draw all actors on top of terrain
     this.drawActors();
 
     // Center camera on player
@@ -122,56 +115,70 @@ export class Game {
     this.camera.state.x = (startPos.col - MAP_W / 2) * CELL_SIZE;
     this.camera.state.y = (startPos.row - MAP_H / 2) * CELL_SIZE;
 
-    // --- HUD ---
+    // Fixed UI overlay (sits above parallax, unaffected by camera)
+    this.uiLayer = new Container();
+    this.app.stage.addChild(this.uiLayer);
+
     this.setupHUD();
+    this.setupFAB();
+    this.setupWheel();
+    this.setupTooltip();
+    this.setupInput();
 
-    // --- Input ---
-    this.setupClickInput();
-
-    this.addMessage('Welcome! Click to move, bump enemies to attack.');
-    console.log('[game] initialized');
+    this.addMessage('Hold ⚡ and drag to select an action.');
+    this.addMessage('Tap a floor tile to move.');
   }
 
-  // ─── HUD ────────────────────────────────────────────────────────────────────
+  // ─── HUD ───────────────────────────────────────────────────────────────────
 
   private setupHUD() {
-    const hudStyle = new TextStyle({
-      fontFamily: '"Courier New", monospace',
-      fontSize: 14,
-      fill: 0xaaddff,
-      fontWeight: 'bold',
-    });
-    const msgStyle = new TextStyle({
-      fontFamily: '"Courier New", monospace',
-      fontSize: 12,
-      fill: 0xccccaa,
-    });
+    const hudStyle  = new TextStyle({ fontFamily: '"Courier New", monospace', fontSize: 18, fill: 0xaaddff, fontWeight: 'bold' });
+    const msgStyle  = new TextStyle({ fontFamily: '"Courier New", monospace', fontSize: 15, fill: 0xccccaa });
+    const modeStyle = new TextStyle({ fontFamily: '"Courier New", monospace', fontSize: 16, fill: 0xffee88, fontWeight: 'bold', wordWrap: true, wordWrapWidth: 360 });
 
-    this.hudText = new Text({ text: '', style: hudStyle });
-    this.hudText.x = 8;
-    this.hudText.y = 8;
-    this.app.stage.addChild(this.hudText);
+    this.hudText  = new Text({ text: '', style: hudStyle });
+    this.msgText  = new Text({ text: '', style: msgStyle });
+    this.modeText = new Text({ text: '', style: modeStyle });
 
-    this.msgText = new Text({ text: '', style: msgStyle });
-    this.msgText.x = 8;
-    this.msgText.y = 30;
-    this.app.stage.addChild(this.msgText);
+    this.hudText.x  = 10; this.hudText.y  = 10;
+    this.msgText.x  = 10; this.msgText.y  = 36;
+    this.modeText.x = 10; this.modeText.y = 0; // positioned in loop
+
+    this.uiLayer.addChild(this.hudText);
+    this.uiLayer.addChild(this.msgText);
+    this.uiLayer.addChild(this.modeText);
   }
 
   private updateHUD() {
     const hp = this.world.getComponent<Health>(this.playerId, 'health');
     const hpStr = hp ? `HP: ${Math.max(0, Math.ceil(hp.current))}/${hp.max}` : 'HP: --';
-    const phaseStr =
-      this.phase === 'player' ? '[YOUR TURN]' :
-      this.phase === 'enemy'  ? '[...]' :
-                                '[GAME OVER]';
+    const phaseStr = this.phase === 'player' ? '[YOUR TURN]' : this.phase === 'enemy' ? '[ ... ]' : '[GAME OVER]';
     const enemies = this.world.query('position', 'faction').filter(id => {
-      const f = this.world.getComponent<Faction>(id, 'faction')!;
-      return f.team === 'enemy';
+      return this.world.getComponent<Faction>(id, 'faction')?.team === 'enemy';
     }).length;
 
-    this.hudText.text = `${hpStr}   Turn: ${this.turnCount}   Enemies: ${enemies}   ${phaseStr}`;
+    this.hudText.text = `${hpStr}   T:${this.turnCount}   Enemies:${enemies}   ${phaseStr}`;
     this.msgText.text = this.messages.slice(0, 3).join('\n');
+
+    // Mode hint at bottom
+    const sw = this.app.screen.width, sh = this.app.screen.height;
+    this.modeText.y = sh - 100;
+    this.modeText.x = 10;
+    (this.modeText.style as TextStyle).wordWrapWidth = sw - 20;
+    if (this.mode === 'targeting' && this.selectedAbility) {
+      const a = this.selectedAbility;
+      this.modeText.text = `▶ ${a.name}  •  tap enemy to cast\ntap your tile (@) to cancel`;
+    } else {
+      this.modeText.text = '';
+    }
+
+    // FAB position (bottom-right, above thumb area)
+    if (this.fabGfx) {
+      this.fabGfx.x = sw - 60;
+      this.fabGfx.y = sh - 70;
+      this.fabLabel.x = sw - 60;
+      this.fabLabel.y = sh - 70;
+    }
   }
 
   private addMessage(msg: string) {
@@ -179,101 +186,266 @@ export class Game {
     if (this.messages.length > 6) this.messages.pop();
   }
 
-  // ─── INPUT ──────────────────────────────────────────────────────────────────
+  // ─── FAB (floating action button) ─────────────────────────────────────────
 
-  private setupClickInput() {
-    const canvas = this.app.canvas as HTMLCanvasElement;
-
-    // Mouse click — use CSS (logical) coords; PixiJS autoDensity handles HiDPI internally
-    canvas.addEventListener('click', (e) => {
-      if (this.phase !== 'player') return;
-      if (this.camera.hasDragged) return; // was a pan, not a click
-      const rect = canvas.getBoundingClientRect();
-      const screenX = e.clientX - rect.left;
-      const screenY = e.clientY - rect.top;
-      this.handleScreenTap(screenX, screenY);
+  private setupFAB() {
+    this.fabGfx = new Graphics();
+    this.fabGfx.circle(0, 0, 34).fill({ color: 0x112244, alpha: 0.92 }).stroke({ color: 0x3366bb, alpha: 0.85, width: 2.5 });
+    this.fabGfx.eventMode = 'static';
+    this.fabGfx.cursor    = 'pointer';
+    this.fabGfx.on('pointerdown', (e) => {
+      e.stopPropagation();
+      if (this.phase !== 'player' || this.mode !== 'free') return;
+      this.tooltip.hide();
+      this.wheel.open(
+        this.buildWheelNodes(),
+        this.app.screen.width  / 2,
+        this.app.screen.height / 2,
+        () => {
+          // Prevent the canvas click/tap that fires after pointerup from
+          // being misread as a map tap.
+          this.wheelJustClosed = true;
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            this.wheelJustClosed = false;
+          }));
+        },
+      );
+      this.wheelDragging    = true;
+      this.camera.disabled  = true;
     });
 
-    // Touch tap — fire when touch ended without significant drag
-    let touchStartX = 0;
-    let touchStartY = 0;
+    const style = new TextStyle({ fontFamily: '"Courier New", monospace', fontSize: 22, fill: 0x6699ff, fontWeight: 'bold' });
+    this.fabLabel = new Text({ text: '⚡', style });
+    this.fabLabel.anchor.set(0.5);
+    this.fabLabel.eventMode = 'none';
+
+    this.uiLayer.addChild(this.fabGfx);
+    this.uiLayer.addChild(this.fabLabel);
+  }
+
+  // ─── WHEEL ────────────────────────────────────────────────────────────────
+
+  private setupWheel() {
+    this.wheel = new RadialWheel();
+    this.uiLayer.addChild(this.wheel.container);
+  }
+
+  private setupTooltip() {
+    this.tooltip = new TooltipOverlay();
+    this.uiLayer.addChild(this.tooltip.container);
+  }
+
+  private buildWheelNodes(): WheelNode[] {
+    const abilities = this.world.getComponent<Abilities>(this.playerId, 'abilities');
+    const spellNodes: WheelNode[] = abilities
+      ? abilities.list.map(a => ({
+          id: a.id,
+          label: a.name,
+          icon: this.spellIcon(a),
+          color: ELEMENT_COLOR[a.element] ?? 0x888888,
+          disabled: a.cooldownCurrent > 0,
+          badge: a.cooldownCurrent > 0 ? `cd:${a.cooldownCurrent}` : undefined,
+          action: () => this.enterTargeting(a),
+        }))
+      : [];
+
+    const root: WheelNode[] = [
+      {
+        id: 'wait',
+        label: 'Wait',
+        icon: '…',
+        color: 0x446644,
+        action: () => this.endPlayerTurn(),
+      },
+    ];
+
+    if (spellNodes.length > 0) {
+      root.unshift({
+        id: 'spells',
+        label: 'Spells',
+        icon: '✦',
+        color: 0x334488,
+        children: spellNodes,
+      });
+    }
+
+    return root;
+  }
+
+  private spellIcon(a: Ability): string {
+    switch (a.element) {
+      case 'fire':      return '🔥';
+      case 'lightning': return '⚡';
+      case 'ice':       return '❄';
+      case 'poison':    return '☠';
+      case 'arcane':    return '✦';
+      default:          return '·';
+    }
+  }
+
+  // ─── TARGETING MODE ───────────────────────────────────────────────────────
+
+  private enterTargeting(ability: Ability) {
+    this.mode = 'targeting';
+    this.selectedAbility = ability;
+    this.showRangeHighlight(ability);
+    this.addMessage(`Select target for ${ability.name}. Tap yourself to cancel.`);
+  }
+
+  private cancelTargeting() {
+    this.clearRangeHighlight();
+    this.mode = 'free';
+    this.selectedAbility = null;
+    this.addMessage('Cancelled.');
+  }
+
+  private showRangeHighlight(ability: Ability) {
+    const pos   = this.world.getComponent<Position>(this.playerId, 'position')!;
+    const color = ELEMENT_COLOR[ability.element] ?? 0xffffff;
+    const allTiles = getRangeTiles(pos.col, pos.row, ability.range, this.mapData);
+
+    // All walkable tiles in range are valid targets (including enemy tiles).
+    this.highlightTiles = allTiles.filter(([c, r]) => this.mapData.walkable[r]?.[c]);
+
+    for (const [c, r] of this.highlightTiles) {
+      // If an enemy stands here, overlay their glyph with the spell colour.
+      const actor = this.getActorAt(c, r, 'enemy');
+      if (actor !== null) {
+        const rend = this.world.getComponent<Renderable>(actor, 'renderable')!;
+        this.renderer.setCell('gameplay', c, r, { char: rend.char, fg: color, alpha: 0.9 });
+      } else {
+        this.renderer.setCell('gameplay', c, r, { char: '·', fg: color, alpha: 0.55 });
+      }
+    }
+  }
+
+  private clearRangeHighlight() {
+    for (const [c, r] of this.highlightTiles) this.restoreTerrain(c, r);
+    this.drawActors();
+    this.highlightTiles = [];
+  }
+
+  // ─── INPUT ────────────────────────────────────────────────────────────────
+
+  private setupInput() {
+    const canvas = this.app.canvas as HTMLCanvasElement;
+    const toCanvas = (clientX: number, clientY: number) => {
+      const rect  = canvas.getBoundingClientRect();
+      const scale = this.app.screen.width / rect.width;
+      return [(clientX - rect.left) * scale, (clientY - rect.top) * scale] as const;
+    };
+
+    // ── Wheel drag: window-level so pointer can leave the FAB ──────────
+    window.addEventListener('pointermove', (e) => {
+      if (!this.wheelDragging) return;
+      const [x, y] = toCanvas(e.clientX, e.clientY);
+      this.wheel.update(x, y);
+    });
+
+    window.addEventListener('pointerup', () => {
+      if (!this.wheelDragging) return;
+      this.wheel.commit();
+      this.wheelDragging   = false;
+      this.camera.disabled = false;
+    });
+
+    // ── Map taps (move / cast) ─────────────────────────────────────────
+    canvas.addEventListener('click', (e) => {
+      if (this.camera.hasDragged || this.wheelJustClosed) return;
+      const [x, y] = toCanvas(e.clientX, e.clientY);
+      this.handleTap(x, y);
+    });
+
+    let touchStartX = 0, touchStartY = 0;
     canvas.addEventListener('touchstart', (e) => {
       const t = e.touches[0];
-      touchStartX = t.clientX;
-      touchStartY = t.clientY;
+      touchStartX = t.clientX; touchStartY = t.clientY;
     }, { passive: true });
 
     canvas.addEventListener('touchend', (e) => {
-      if (this.phase !== 'player') return;
-      if (this.camera.hasDragged) return;
+      if (this.camera.hasDragged || this.wheelJustClosed || this.wheelDragging) return;
       const t = e.changedTouches[0];
-      const dx = t.clientX - touchStartX;
-      const dy = t.clientY - touchStartY;
-      if (Math.hypot(dx, dy) > 8) return; // was a swipe, not a tap
-      const rect = canvas.getBoundingClientRect();
-      const screenX = t.clientX - rect.left;
-      const screenY = t.clientY - rect.top;
-      this.handleScreenTap(screenX, screenY);
+      if (Math.hypot(t.clientX - touchStartX, t.clientY - touchStartY) > 8) return;
+      const [x, y] = toCanvas(t.clientX, t.clientY);
+      this.handleTap(x, y);
     }, { passive: true });
   }
 
-  /** Convert screen CSS coords → tile col/row and route the action. */
-  private handleScreenTap(screenX: number, screenY: number) {
-    const layerPixelW = MAP_W * CELL_SIZE;
-    const layerPixelH = MAP_H * CELL_SIZE;
-    const layerOriginX = (this.app.screen.width  - layerPixelW) / 2 - this.camera.state.x;
-    const layerOriginY = (this.app.screen.height - layerPixelH) / 2 - this.camera.state.y;
-
+  private screenToTile(screenX: number, screenY: number): [number, number] {
+    const layerOriginX = (this.app.screen.width  - MAP_W * CELL_SIZE) / 2 - this.camera.state.x;
+    const layerOriginY = (this.app.screen.height - MAP_H * CELL_SIZE) / 2 - this.camera.state.y;
     const col = Math.floor((screenX - layerOriginX) / CELL_SIZE);
     const row = Math.floor((screenY - layerOriginY) / CELL_SIZE);
-
-    if (col < 0 || col >= MAP_W || row < 0 || row >= MAP_H) return;
-    this.handlePlayerAction(col, row);
+    return [col, row];
   }
 
-  // ─── TURN FLOW ──────────────────────────────────────────────────────────────
+  private handleTap(screenX: number, screenY: number) {
+    if (this.phase === 'game_over') return;
+    if (this.phase !== 'player') return;
 
-  private handlePlayerAction(targetCol: number, targetRow: number) {
+    const [col, row] = this.screenToTile(screenX, screenY);
+    if (col < 0 || col >= MAP_W || row < 0 || row >= MAP_H) return;
+
     const playerPos = this.world.getComponent<Position>(this.playerId, 'position')!;
 
-    // Clicking own tile does nothing
-    if (targetCol === playerPos.col && targetRow === playerPos.row) return;
-
-    // If an enemy is at target, attack directly (if in range)
-    const enemyAt = this.getActorAt(targetCol, targetRow, 'enemy');
-    const dx = Math.abs(targetCol - playerPos.col);
-    const dy = Math.abs(targetRow - playerPos.row);
-
-    if (enemyAt !== null && dx <= 1 && dy <= 1) {
-      this.performAttack(this.playerId, enemyAt);
+    if (this.mode === 'targeting') {
+      this.tooltip.hide();
+      // Tap own tile = cancel
+      if (col === playerPos.col && row === playerPos.row) {
+        this.cancelTargeting();
+        return;
+      }
+      // Check range
+      const dist = Math.sqrt((col - playerPos.col) ** 2 + (row - playerPos.row) ** 2);
+      if (dist > this.selectedAbility!.range) {
+        this.addMessage('Out of range.');
+        return;
+      }
+      this.clearRangeHighlight();
+      resolveSpell(this.world, this.playerId, this.selectedAbility!, col, row, this.mapData, this.addMessage.bind(this));
+      this.mode = 'free';
+      this.selectedAbility = null;
+      this.drawActors();
       this.endPlayerTurn();
       return;
     }
 
-    // Otherwise pathfind
-    if (!this.mapData.walkable[targetRow]?.[targetCol]) return;
-
-    const path = this.findPath(playerPos.col, playerPos.row, targetCol, targetRow, this.playerId);
-    if (path.length < 2) return;
-
-    const [nextCol, nextRow] = path[1];
-
-    // Bump-attack if next step has an enemy
-    const bumpEnemy = this.getActorAt(nextCol, nextRow, 'enemy');
-    if (bumpEnemy !== null) {
-      this.performAttack(this.playerId, bumpEnemy);
-    } else {
-      this.moveEntity(this.playerId, nextCol, nextRow);
+    // free mode — tap own tile → inspect self
+    if (col === playerPos.col && row === playerPos.row) {
+      const sw = this.app.screen.width, sh = this.app.screen.height;
+      this.tooltip.show(this.world, this.playerId, screenX, screenY, sw, sh);
+      return;
     }
 
+    // Tap enemy → inspect (tooltip), not attack
+    const enemy = this.getActorAt(col, row, 'enemy');
+    if (enemy !== null) {
+      const sw = this.app.screen.width, sh = this.app.screen.height;
+      this.tooltip.show(this.world, enemy, screenX, screenY, sw, sh);
+      return;
+    }
+
+    // Tap floor → hide tooltip, pathfind & move one step
+    this.tooltip.hide();
+    if (!this.mapData.walkable[row]?.[col]) return;
+    const path = this.findPath(playerPos.col, playerPos.row, col, row, this.playerId);
+    if (path.length < 2) return;
+    this.moveEntity(this.playerId, path[1][0], path[1][1]);
     this.endPlayerTurn();
   }
+
+  // ─── TURN FLOW ────────────────────────────────────────────────────────────
 
   private endPlayerTurn() {
     this.turnCount++;
     this.phase = 'enemy';
-    // Brief delay so the player can see their action before enemies move
-    setTimeout(() => this.processEnemyTurns(), 120);
+    // Run environment interactions at end of each full round
+    for (const id of this.world.query('status', 'position')) {
+      processInteractions(this.world, id, { trigger: 'turn_start' });
+    }
+    // Tick spell cooldowns
+    tickCooldowns(this.world);
+    setTimeout(() => this.processEnemyTurns(), 140);
   }
 
   private processEnemyTurns() {
@@ -283,11 +455,9 @@ export class Game {
     }
 
     const playerPos = this.world.getComponent<Position>(this.playerId, 'position')!;
-
-    const enemies = this.world.query('position', 'faction', 'health', 'combat').filter(id => {
-      const f = this.world.getComponent<Faction>(id, 'faction')!;
-      return f.team === 'enemy';
-    });
+    const enemies = this.world.query('position', 'faction', 'health', 'combat').filter(id =>
+      this.world.getComponent<Faction>(id, 'faction')?.team === 'enemy'
+    );
 
     for (const enemyId of enemies) {
       const ePos = this.world.getComponent<Position>(enemyId, 'position')!;
@@ -295,81 +465,60 @@ export class Game {
       const dy = Math.abs(playerPos.row - ePos.row);
 
       if (dx <= 1 && dy <= 1) {
-        // Adjacent — attack
-        this.performAttack(enemyId, this.playerId);
-        // Player might have died
+        // Adjacent — melee strike
+        this.enemyMelee(enemyId, this.playerId);
         if (!this.world.hasComponent(this.playerId, 'health')) break;
       } else {
-        // Move one step toward player
+        // Move toward player
         const path = this.findPath(ePos.col, ePos.row, playerPos.col, playerPos.row, enemyId);
         if (path.length >= 2) {
-          const [nextCol, nextRow] = path[1];
-          // Don't step onto player tile (attack handled above next turn)
-          if (nextCol !== playerPos.col || nextRow !== playerPos.row) {
-            this.moveEntity(enemyId, nextCol, nextRow);
+          const [nc, nr] = path[1];
+          if (nc !== playerPos.col || nr !== playerPos.row) {
+            this.moveEntity(enemyId, nc, nr);
           }
         }
       }
     }
 
     this.phase = this.world.hasComponent(this.playerId, 'health') ? 'player' : 'game_over';
-    if (this.phase === 'game_over') {
-      this.addMessage('You have died. Refresh to play again.');
-    }
+    if (this.phase === 'game_over') this.addMessage('You have died. Refresh to play again.');
   }
 
-  // ─── COMBAT ─────────────────────────────────────────────────────────────────
+  // ─── COMBAT ───────────────────────────────────────────────────────────────
 
-  private performAttack(attackerId: number, defenderId: number) {
-    const atkCombat = this.world.getComponent<Combat>(attackerId, 'combat')!;
+  /** Enemy basic melee strike using their Combat component. */
+  private enemyMelee(attackerId: number, defenderId: number) {
+    const atk = this.world.getComponent<Combat>(attackerId, 'combat')!;
     const defCombat = this.world.getComponent<Combat>(defenderId, 'combat');
     const defHealth = this.world.getComponent<Health>(defenderId, 'health');
     if (!defHealth) return;
 
-    const defense = defCombat?.defense ?? 0;
-    const damage = Math.max(1, atkCombat.attackPower + Math.floor(Math.random() * 6) - defense);
-    defHealth.current -= damage;
-
-    const isPlayer = attackerId === this.playerId;
-    this.addMessage(isPlayer
-      ? `You hit for ${damage}!`
-      : `Enemy hits you for ${damage}!`);
+    const def = defCombat?.defense ?? 0;
+    const dmg = Math.max(1, atk.attackPower + Math.floor(Math.random() * 4) - def);
+    defHealth.current -= dmg;
+    this.addMessage(`Enemy hits you for ${dmg}!`);
 
     if (defHealth.current <= 0) {
-      if (defenderId === this.playerId) {
-        this.addMessage('YOU DIED. Refresh to restart.');
-        this.phase = 'game_over';
-        this.world.removeComponent(this.playerId, 'health');
-      } else {
-        this.addMessage('Enemy slain!');
-        const pos = this.world.getComponent<Position>(defenderId, 'position')!;
-        this.restoreTerrain(pos.col, pos.row);
-        this.world.removeEntity(defenderId);
-      }
+      this.addMessage('YOU DIED. Refresh to restart.');
+      this.phase = 'game_over';
+      this.world.removeComponent(this.playerId, 'health');
     }
   }
 
-  // ─── MOVEMENT & RENDERING ───────────────────────────────────────────────────
+  // ─── MOVEMENT & RENDERING ─────────────────────────────────────────────────
 
   private moveEntity(entityId: number, newCol: number, newRow: number) {
-    const pos = this.world.getComponent<Position>(entityId, 'position')!;
+    const pos  = this.world.getComponent<Position>(entityId, 'position')!;
     const rend = this.world.getComponent<Renderable>(entityId, 'renderable')!;
 
-    // Erase from old tile
     this.restoreTerrain(pos.col, pos.row);
-
-    // Update ECS
     pos.col = newCol;
     pos.row = newRow;
 
-    // Draw at new tile
     this.renderer.setCell('gameplay', newCol, newRow, {
-      char: rend.char,
-      fg: rend.fg,
-      alpha: rend.alpha ?? 1.0,
+      char: rend.char, fg: rend.fg, alpha: rend.alpha ?? 1.0,
     });
 
-    // Keep camera centered on player
     if (entityId === this.playerId) {
       this.camera.state.x = (newCol - MAP_W / 2) * CELL_SIZE;
       this.camera.state.y = (newRow - MAP_H / 2) * CELL_SIZE;
@@ -379,74 +528,55 @@ export class Game {
   }
 
   private restoreTerrain(col: number, row: number) {
-    const cell = this.mapData.gameplay[row]?.[col] ?? null;
-    this.renderer.setCell('gameplay', col, row, cell);
+    this.renderer.setCell('gameplay', col, row, this.mapData.gameplay[row]?.[col] ?? null);
   }
 
   private drawActors() {
-    const actors = this.world.query('position', 'renderable', 'faction');
-    for (const id of actors) {
-      const pos = this.world.getComponent<Position>(id, 'position')!;
+    for (const id of this.world.query('position', 'renderable', 'faction')) {
+      const pos  = this.world.getComponent<Position>(id, 'position')!;
       const rend = this.world.getComponent<Renderable>(id, 'renderable')!;
-      this.renderer.setCell('gameplay', pos.col, pos.row, {
-        char: rend.char,
-        fg: rend.fg,
-        alpha: rend.alpha ?? 1.0,
-      });
+      // Colour tint for status effects
+      const status = this.world.getComponent<StatusEffect>(id, 'status');
+      let fg = rend.fg;
+      if (status) {
+        if (status.effects.has('burning'))  fg = 0xff5500;
+        if (status.effects.has('shocked'))  fg = 0xffff00;
+        if (status.effects.has('slowed'))   fg = 0x88ccff;
+        if (status.effects.has('poisoned')) fg = 0x66ff44;
+      }
+      this.renderer.setCell('gameplay', pos.col, pos.row, { char: rend.char, fg, alpha: rend.alpha ?? 1.0 });
     }
   }
 
-  // ─── PATHFINDING ────────────────────────────────────────────────────────────
+  // ─── PATHFINDING ──────────────────────────────────────────────────────────
 
-  /**
-   * Find a path from (fromCol, fromRow) to (toCol, toRow).
-   * The mover entity's own position is always passable.
-   * Returns array of [col, row] pairs including start; empty if no path.
-   */
-  private findPath(
-    fromCol: number,
-    fromRow: number,
-    toCol: number,
-    toRow: number,
-    moverId: number,
-  ): [number, number][] {
+  private findPath(fromCol: number, fromRow: number, toCol: number, toRow: number, moverId: number): [number, number][] {
     const moverPos = this.world.getComponent<Position>(moverId, 'position')!;
-
-    const passable = (x: number, y: number): boolean => {
-      // Out of bounds
+    const passable = (x: number, y: number) => {
       if (y < 0 || y >= MAP_H || x < 0 || x >= MAP_W) return false;
-      // Wall
       if (!this.mapData.walkable[y][x]) return false;
-      // Occupied by another actor (except the mover itself and the target tile)
       if (x === moverPos.col && y === moverPos.row) return true;
-      const occupant = this.getActorAt(x, y);
-      return occupant === null || occupant === moverId;
+      const occ = this.getActorAt(x, y);
+      return occ === null || occ === moverId;
     };
-
     const path: [number, number][] = [];
-    const astar = new ROT.Path.AStar(toCol, toRow, (x, y) => passable(x, y));
-    astar.compute(fromCol, fromRow, (x, y) => path.push([x, y]));
+    new ROT.Path.AStar(toCol, toRow, passable).compute(fromCol, fromRow, (x, y) => path.push([x, y]));
     return path;
   }
 
-  // ─── HELPERS ────────────────────────────────────────────────────────────────
+  // ─── HELPERS ──────────────────────────────────────────────────────────────
 
-  /** Returns entity ID of any actor (with faction) at (col, row), optionally filtered by team. */
   private getActorAt(col: number, row: number, team?: string): number | null {
-    const actors = this.world.query('position', 'faction');
-    for (const id of actors) {
+    for (const id of this.world.query('position', 'faction')) {
       const pos = this.world.getComponent<Position>(id, 'position')!;
       if (pos.col !== col || pos.row !== row) continue;
-      if (team) {
-        const faction = this.world.getComponent<Faction>(id, 'faction')!;
-        if (faction.team !== team) continue;
-      }
+      if (team && this.world.getComponent<Faction>(id, 'faction')?.team !== team) continue;
       return id;
     }
     return null;
   }
 
-  // ─── MAIN LOOP ──────────────────────────────────────────────────────────────
+  // ─── MAIN LOOP ────────────────────────────────────────────────────────────
 
   start() {
     this.app.ticker.add(() => this.loop());
