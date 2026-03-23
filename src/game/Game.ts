@@ -129,17 +129,17 @@ export class Game {
   // ─── HUD ───────────────────────────────────────────────────────────────────
 
   private setupHUD() {
-    const hudStyle = new TextStyle({ fontFamily: '"Courier New", monospace', fontSize: 14, fill: 0xaaddff, fontWeight: 'bold' });
-    const msgStyle = new TextStyle({ fontFamily: '"Courier New", monospace', fontSize: 12, fill: 0xccccaa });
-    const modeStyle = new TextStyle({ fontFamily: '"Courier New", monospace', fontSize: 13, fill: 0xffee88, fontWeight: 'bold' });
+    const hudStyle  = new TextStyle({ fontFamily: '"Courier New", monospace', fontSize: 18, fill: 0xaaddff, fontWeight: 'bold' });
+    const msgStyle  = new TextStyle({ fontFamily: '"Courier New", monospace', fontSize: 15, fill: 0xccccaa });
+    const modeStyle = new TextStyle({ fontFamily: '"Courier New", monospace', fontSize: 16, fill: 0xffee88, fontWeight: 'bold', wordWrap: true, wordWrapWidth: 360 });
 
     this.hudText  = new Text({ text: '', style: hudStyle });
     this.msgText  = new Text({ text: '', style: msgStyle });
     this.modeText = new Text({ text: '', style: modeStyle });
 
-    this.hudText.x  = 8; this.hudText.y  = 8;
-    this.msgText.x  = 8; this.msgText.y  = 30;
-    this.modeText.x = 8; this.modeText.y = 0; // positioned in loop
+    this.hudText.x  = 10; this.hudText.y  = 10;
+    this.msgText.x  = 10; this.msgText.y  = 36;
+    this.modeText.x = 10; this.modeText.y = 0; // positioned in loop
 
     this.uiLayer.addChild(this.hudText);
     this.uiLayer.addChild(this.msgText);
@@ -159,21 +159,22 @@ export class Game {
 
     // Mode hint at bottom
     const sw = this.app.screen.width, sh = this.app.screen.height;
-    this.modeText.y = sh - 80;
-    this.modeText.x = 8;
+    this.modeText.y = sh - 100;
+    this.modeText.x = 10;
+    (this.modeText.style as TextStyle).wordWrapWidth = sw - 20;
     if (this.mode === 'targeting' && this.selectedAbility) {
       const a = this.selectedAbility;
-      this.modeText.text = `▶ ${a.name} (${a.element}, rng ${a.range})  — tap target or tap yourself to cancel`;
+      this.modeText.text = `▶ ${a.name}  •  tap enemy to cast\ntap your tile (@) to cancel`;
     } else {
       this.modeText.text = '';
     }
 
     // FAB position (bottom-right, above thumb area)
     if (this.fabGfx) {
-      this.fabGfx.x = sw - 56;
-      this.fabGfx.y = sh - 60;
-      this.fabLabel.x = sw - 56;
-      this.fabLabel.y = sh - 60;
+      this.fabGfx.x = sw - 60;
+      this.fabGfx.y = sh - 70;
+      this.fabLabel.x = sw - 60;
+      this.fabLabel.y = sh - 70;
     }
   }
 
@@ -194,8 +195,8 @@ export class Game {
       if (this.phase !== 'player' || this.mode !== 'free') return;
       this.wheel.open(
         this.buildWheelNodes(),
-        this.fabGfx.x,
-        this.fabGfx.y,
+        this.app.screen.width  / 2,
+        this.app.screen.height / 2,
         () => {
           // Prevent the canvas click/tap that fires after pointerup from
           // being misread as a map tap.
@@ -290,21 +291,22 @@ export class Game {
   }
 
   private showRangeHighlight(ability: Ability) {
-    const pos = this.world.getComponent<Position>(this.playerId, 'position')!;
-    const actorSet = new Set(
-      this.world.query('position', 'faction').map(id => {
-        const p = this.world.getComponent<Position>(id, 'position')!;
-        return `${p.col},${p.row}`;
-      }),
-    );
-
+    const pos   = this.world.getComponent<Position>(this.playerId, 'position')!;
     const color = ELEMENT_COLOR[ability.element] ?? 0xffffff;
     const allTiles = getRangeTiles(pos.col, pos.row, ability.range, this.mapData);
 
-    this.highlightTiles = allTiles.filter(([c, r]) => this.mapData.walkable[r]?.[c] && !actorSet.has(`${c},${r}`));
+    // All walkable tiles in range are valid targets (including enemy tiles).
+    this.highlightTiles = allTiles.filter(([c, r]) => this.mapData.walkable[r]?.[c]);
 
     for (const [c, r] of this.highlightTiles) {
-      this.renderer.setCell('gameplay', c, r, { char: '·', fg: color, alpha: 0.65 });
+      // If an enemy stands here, overlay their glyph with the spell colour.
+      const actor = this.getActorAt(c, r, 'enemy');
+      if (actor !== null) {
+        const rend = this.world.getComponent<Renderable>(actor, 'renderable')!;
+        this.renderer.setCell('gameplay', c, r, { char: rend.char, fg: color, alpha: 0.9 });
+      } else {
+        this.renderer.setCell('gameplay', c, r, { char: '·', fg: color, alpha: 0.55 });
+      }
     }
   }
 
@@ -352,7 +354,7 @@ export class Game {
     }, { passive: true });
 
     canvas.addEventListener('touchend', (e) => {
-      if (this.camera.hasDragged || this.wheelJustClosed) return;
+      if (this.camera.hasDragged || this.wheelJustClosed || this.wheelDragging) return;
       const t = e.changedTouches[0];
       if (Math.hypot(t.clientX - touchStartX, t.clientY - touchStartY) > 8) return;
       const [x, y] = toCanvas(t.clientX, t.clientY);
