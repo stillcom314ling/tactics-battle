@@ -26,6 +26,8 @@ export interface GeneratedMap {
   width: number;
   /** Height in tiles */
   height: number;
+  /** walkable[row][col] — true if a unit can move there */
+  walkable: boolean[][];
 }
 
 const FLOOR_CHARS = ['.', '·', ',', '`'];
@@ -61,7 +63,7 @@ export function generateMap(width: number, height: number): GeneratedMap {
     }
   }
 
-  dungeon.create((x, y, wall) => {
+  dungeon.create((x: number, y: number, wall: number) => {
     if (y >= 0 && y < height && x >= 0 && x < width) {
       wallMap[y][x] = wall === 1;
     }
@@ -115,7 +117,16 @@ export function generateMap(width: number, height: number): GeneratedMap {
     }
   }
 
-  return { gameplay, bgFar, bgMid, foreground, width, height };
+  // Build walkable grid (true = passable)
+  const walkable: boolean[][] = [];
+  for (let r = 0; r < height; r++) {
+    walkable[r] = [];
+    for (let c = 0; c < width; c++) {
+      walkable[r][c] = !wallMap[r][c];
+    }
+  }
+
+  return { gameplay, bgFar, bgMid, foreground, width, height, walkable };
 }
 
 /**

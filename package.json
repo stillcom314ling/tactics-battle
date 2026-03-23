@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "pixi.js": "^8.6.6",
-    "rot-js": "^2.3.0"
+    "rot-js": "^2.2.1"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
