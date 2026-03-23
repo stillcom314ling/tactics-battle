@@ -183,29 +183,52 @@ export class Game {
 
   private setupClickInput() {
     const canvas = this.app.canvas as HTMLCanvasElement;
+
+    // Mouse click — use CSS (logical) coords; PixiJS autoDensity handles HiDPI internally
     canvas.addEventListener('click', (e) => {
       if (this.phase !== 'player') return;
-
+      if (this.camera.hasDragged) return; // was a pan, not a click
       const rect = canvas.getBoundingClientRect();
-      // Account for CSS scaling vs canvas resolution
-      const scaleX = canvas.width / rect.width;
-      const scaleY = canvas.height / rect.height;
-      const screenX = (e.clientX - rect.left) * scaleX;
-      const screenY = (e.clientY - rect.top) * scaleY;
-
-      // Convert screen px → tile col/row using the gameplay layer's current position
-      const layerPixelW = MAP_W * CELL_SIZE;
-      const layerPixelH = MAP_H * CELL_SIZE;
-      const layerOriginX = (this.app.screen.width - layerPixelW) / 2 - this.camera.state.x;
-      const layerOriginY = (this.app.screen.height - layerPixelH) / 2 - this.camera.state.y;
-
-      const col = Math.floor((screenX - layerOriginX) / CELL_SIZE);
-      const row = Math.floor((screenY - layerOriginY) / CELL_SIZE);
-
-      if (col < 0 || col >= MAP_W || row < 0 || row >= MAP_H) return;
-
-      this.handlePlayerAction(col, row);
+      const screenX = e.clientX - rect.left;
+      const screenY = e.clientY - rect.top;
+      this.handleScreenTap(screenX, screenY);
     });
+
+    // Touch tap — fire when touch ended without significant drag
+    let touchStartX = 0;
+    let touchStartY = 0;
+    canvas.addEventListener('touchstart', (e) => {
+      const t = e.touches[0];
+      touchStartX = t.clientX;
+      touchStartY = t.clientY;
+    }, { passive: true });
+
+    canvas.addEventListener('touchend', (e) => {
+      if (this.phase !== 'player') return;
+      if (this.camera.hasDragged) return;
+      const t = e.changedTouches[0];
+      const dx = t.clientX - touchStartX;
+      const dy = t.clientY - touchStartY;
+      if (Math.hypot(dx, dy) > 8) return; // was a swipe, not a tap
+      const rect = canvas.getBoundingClientRect();
+      const screenX = t.clientX - rect.left;
+      const screenY = t.clientY - rect.top;
+      this.handleScreenTap(screenX, screenY);
+    }, { passive: true });
+  }
+
+  /** Convert screen CSS coords → tile col/row and route the action. */
+  private handleScreenTap(screenX: number, screenY: number) {
+    const layerPixelW = MAP_W * CELL_SIZE;
+    const layerPixelH = MAP_H * CELL_SIZE;
+    const layerOriginX = (this.app.screen.width  - layerPixelW) / 2 - this.camera.state.x;
+    const layerOriginY = (this.app.screen.height - layerPixelH) / 2 - this.camera.state.y;
+
+    const col = Math.floor((screenX - layerOriginX) / CELL_SIZE);
+    const row = Math.floor((screenY - layerOriginY) / CELL_SIZE);
+
+    if (col < 0 || col >= MAP_W || row < 0 || row >= MAP_H) return;
+    this.handlePlayerAction(col, row);
   }
 
   // ─── TURN FLOW ──────────────────────────────────────────────────────────────
@@ -345,6 +368,14 @@ export class Game {
       fg: rend.fg,
       alpha: rend.alpha ?? 1.0,
     });
+
+    // Keep camera centered on player
+    if (entityId === this.playerId) {
+      this.camera.state.x = (newCol - MAP_W / 2) * CELL_SIZE;
+      this.camera.state.y = (newRow - MAP_H / 2) * CELL_SIZE;
+      this.camera.state.velocityX = 0;
+      this.camera.state.velocityY = 0;
+    }
   }
 
   private restoreTerrain(col: number, row: number) {

@@ -13,10 +13,16 @@ export interface CameraState {
   velocityY: number;
 }
 
+const DRAG_THRESHOLD = 6; // pixels before we consider it a drag vs a tap/click
+
 export class CameraController {
   public state: CameraState = { x: 0, y: 0, velocityX: 0, velocityY: 0 };
+  /** True if the last pointer-down moved enough to count as a drag (not a tap). */
+  public hasDragged = false;
 
   private isDragging = false;
+  private startPointerX = 0;
+  private startPointerY = 0;
   private lastPointerX = 0;
   private lastPointerY = 0;
   private friction = 0.92;
@@ -48,6 +54,9 @@ export class CameraController {
 
   private onPointerDown(x: number, y: number) {
     this.isDragging = true;
+    this.hasDragged = false;
+    this.startPointerX = x;
+    this.startPointerY = y;
     this.lastPointerX = x;
     this.lastPointerY = y;
     this.state.velocityX = 0;
@@ -60,6 +69,12 @@ export class CameraController {
     const dx = x - this.lastPointerX;
     const dy = y - this.lastPointerY;
 
+    // Only pan once we've moved past the drag threshold
+    const totalDx = x - this.startPointerX;
+    const totalDy = y - this.startPointerY;
+    if (!this.hasDragged && Math.hypot(totalDx, totalDy) < DRAG_THRESHOLD) return;
+
+    this.hasDragged = true;
     // Move camera opposite to drag direction (drag right = camera moves left = world moves right)
     this.state.x -= dx;
     this.state.y -= dy;
