@@ -10,8 +10,9 @@
  */
 
 import * as ROT from 'rot-js';
-import { World, Position, Renderable, Terrain, Health, Faction, StatusEffect, Movement, Combat } from '../core/ECS';
+import { World, Position, Renderable, Terrain, Health, Faction, StatusEffect, Movement, Combat, Abilities } from '../core/ECS';
 import { AsciiCell } from '../rendering/ParallaxAsciiRenderer';
+import { makeFlameBolt, makeArcLightning, makeFrostShard } from './SpellSystem';
 
 export interface GeneratedMap {
   /** Gameplay layer cell data */
@@ -179,6 +180,7 @@ export function populateWorld(
   world.addComponent(playerId, { type: 'status', effects: new Set() } as StatusEffect);
   world.addComponent(playerId, { type: 'movement', range: 5, canFly: false } as Movement);
   world.addComponent(playerId, { type: 'combat', attackPower: 15, defense: 5, attackRange: 1 } as Combat);
+  world.addComponent(playerId, { type: 'abilities', list: [makeFlameBolt(), makeArcLightning(), makeFrostShard()] } as Abilities);
 
   // Place some enemies
   const enemyCount = 4 + Math.floor(Math.random() * 4);

@@ -74,6 +74,26 @@ export interface Terrain extends Component {
   properties: Set<string>; // e.g. 'flammable', 'conductive', 'slippery'
 }
 
+// --- ABILITY (a single spell / skill) ---
+export interface Ability {
+  id: string;
+  name: string;
+  element: 'fire' | 'lightning' | 'ice' | 'poison' | 'arcane' | 'none';
+  range: number;
+  pattern: 'single' | 'line' | 'aoe' | 'self';
+  aoeRadius?: number;
+  damage: number;
+  effects: string[]; // status labels to apply: 'burning', 'wet', 'stunned', etc.
+  cooldownMax: number;
+  cooldownCurrent: number;
+}
+
+// --- ABILITIES (entity's spell list) ---
+export interface Abilities extends Component {
+  type: 'abilities';
+  list: Ability[];
+}
+
 // ---------- THE WORLD ----------
 
 export class World {
