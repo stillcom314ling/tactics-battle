@@ -18,8 +18,12 @@ export interface TurnActor {
   speed: number; // higher = acts more often
 }
 
+type WrappedActor = TurnActor & { getSpeed: () => number };
+
 export class TurnManager {
-  private scheduler: ROT.Scheduler.Speed<TurnActor>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private scheduler: InstanceType<typeof ROT.Scheduler.Speed>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private engine: ROT.Engine;
   public currentActor: TurnActor | null = null;
   public currentPhase: TurnPhase = 'player';
@@ -30,13 +34,13 @@ export class TurnManager {
   public onTurnStart: ((actor: TurnActor) => void) | null = null;
 
   constructor(private world: World) {
-    this.scheduler = new ROT.Scheduler.Speed<TurnActor>();
+    this.scheduler = new ROT.Scheduler.Speed();
     this.engine = new ROT.Engine(this.scheduler);
   }
 
   addActor(actor: TurnActor) {
     // rot.js Speed scheduler needs a getSpeed() method
-    const wrapped = {
+    const wrapped: WrappedActor = {
       ...actor,
       getSpeed: () => actor.speed,
     };
