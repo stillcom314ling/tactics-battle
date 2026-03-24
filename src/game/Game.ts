@@ -363,6 +363,8 @@ export class Game {
 
   private clearRangeHighlight() {
     this.clearSpellPreview();
+    this.pendingTargetCol = null;
+    this.pendingTargetRow = null;
     for (const [c, r] of this.highlightTiles) this.restoreTerrain(c, r);
     this.drawActors();
     this.highlightTiles = [];
@@ -416,8 +418,6 @@ export class Game {
       }
     }
     this.spellPreviewTiles = [];
-    this.pendingTargetCol  = null;
-    this.pendingTargetRow  = null;
   }
 
   // ─── INPUT ────────────────────────────────────────────────────────────────
