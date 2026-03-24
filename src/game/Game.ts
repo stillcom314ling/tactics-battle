@@ -121,6 +121,12 @@ export class Game {
 
     const { playerId } = populateWorld(this.world, this.mapData);
     this.playerId = playerId;
+
+    // Init overlay graphics before drawActors() so the first call doesn't crash
+    this.entityOverlayGfx = new Graphics();
+    this.entityOverlayGfx.eventMode = 'none';
+    // (added to uiLayer later in setupEntityOverlay after uiLayer is created)
+
     this.drawActors();
 
     // Center camera on player
@@ -250,9 +256,7 @@ export class Game {
   }
 
   private setupEntityOverlay() {
-    // Single Graphics object redrawn every frame for per-entity HP bars
-    this.entityOverlayGfx = new Graphics();
-    this.entityOverlayGfx.eventMode = 'none'; // never intercept input
+    // entityOverlayGfx was pre-created before drawActors(); just add it to uiLayer now
     this.uiLayer.addChild(this.entityOverlayGfx);
 
     // Red screen-flash filter applied to the parallax root on player hit
@@ -719,17 +723,13 @@ export class Game {
   }
 
   private drawActors() {
-    const overlay = this.entityOverlayGfx;
-    overlay.clear();
-    const { x: ox, y: oy, cellSize } = this.renderer.getLayerScreenOffset('gameplay');
-
     for (const id of this.world.query('position', 'renderable', 'faction')) {
       const pos    = this.world.getComponent<Position>(id, 'position')!;
       const rend   = this.world.getComponent<Renderable>(id, 'renderable')!;
       const status = this.world.getComponent<StatusEffect>(id, 'status');
       const hp     = this.world.getComponent<Health>(id, 'health');
 
-      // ── Glyph color: status > HP-tint > base ──────────────────────
+      // Glyph color: status > HP-tint > base
       let fg = rend.fg;
       const hasStatus = status && status.effects.size > 0;
       if (hasStatus) {
@@ -740,29 +740,35 @@ export class Game {
       } else if (hp && hp.max > 0) {
         const ratio = Math.max(0, hp.current / hp.max);
         if (ratio < 0.6) {
-          // Lerp base color toward dark red as HP drops
-          const t = (1 - ratio / 0.6) * 0.55;
-          fg = lerpColor(rend.fg, 0x993333, t);
+          fg = lerpColor(rend.fg, 0x993333, (1 - ratio / 0.6) * 0.55);
         }
       }
       this.renderer.setCell('gameplay', pos.col, pos.row, { char: rend.char, fg, alpha: rend.alpha ?? 1.0 });
+    }
+  }
 
-      // ── Mini HP bar (drawn in screen space, below glyph) ──────────
-      if (hp && hp.max > 0 && id !== this.playerId) {
-        const ratio = Math.max(0, Math.min(1, hp.current / hp.max));
-        if (ratio < 1.0) {
-          const barW    = cellSize - 2;
-          const barH    = 2;
-          const barX    = ox + pos.col * cellSize + 1;
-          const barY    = oy + pos.row * cellSize + cellSize - 3;
-          const barColor = ratio > 0.6 ? 0x44dd44 : ratio > 0.3 ? 0xffcc00 : 0xff3333;
+  /** Redrawn every frame — HP bars follow camera movement since they use live screen coords. */
+  private drawHealthBars() {
+    const overlay = this.entityOverlayGfx;
+    overlay.clear();
+    const { x: ox, y: oy, cellSize } = this.renderer.getLayerScreenOffset('gameplay');
 
-          // Dark background
-          overlay.rect(barX, barY - 1, barW, barH + 2).fill({ color: 0x000000, alpha: 0.7 });
-          // Colored fill
-          overlay.rect(barX, barY, Math.round(barW * ratio), barH).fill({ color: barColor });
-        }
-      }
+    for (const id of this.world.query('position', 'health', 'faction')) {
+      if (id === this.playerId) continue;
+      const pos = this.world.getComponent<Position>(id, 'position')!;
+      const hp  = this.world.getComponent<Health>(id, 'health')!;
+      if (hp.max <= 0) continue;
+      const ratio = Math.max(0, Math.min(1, hp.current / hp.max));
+      if (ratio >= 1.0) continue; // hide at full HP
+
+      const barW    = cellSize - 2;
+      const barH    = 2;
+      const barX    = ox + pos.col * cellSize + 1;
+      const barY    = oy + pos.row * cellSize + cellSize - 3;
+      const barColor = ratio > 0.6 ? 0x44dd44 : ratio > 0.3 ? 0xffcc00 : 0xff3333;
+
+      overlay.rect(barX, barY - 1, barW, barH + 2).fill({ color: 0x000000, alpha: 0.7 });
+      overlay.rect(barX, barY, Math.round(barW * ratio), barH).fill({ color: barColor });
     }
   }
 
@@ -806,6 +812,7 @@ export class Game {
     this.renderer.cameraY = this.camera.state.y;
     this.renderer.updateCamera(this.app.screen.width, this.app.screen.height);
     this.updateHUD();
+    this.drawHealthBars();
 
     // Hit-flash: briefly tint the whole scene red when player takes damage
     if (this.hitFlashFrames > 0) {
