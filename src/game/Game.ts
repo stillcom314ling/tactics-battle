@@ -223,7 +223,9 @@ export class Game {
       if (this.actionMenu.isOpen) { this.actionMenu.close(); return; }
       this.tooltip.hide();
       const sw = this.app.screen.width, sh = this.app.screen.height;
-      this.actionMenu.open(this.buildActiveItems(), sw, sh);
+      this.actionMenu.open(this.buildActiveItems(), sw, sh, () => {
+        this.camera.disabled = false;
+      });
       this.camera.disabled = true;
     });
 
@@ -240,14 +242,20 @@ export class Game {
 
   private setupActionMenu() {
     this.actionMenu = new ActionMenu();
-    this.actionMenu.container.eventMode = 'static';
     this.uiLayer.addChild(this.actionMenu.container);
   }
 
   // ─── D-PAD ────────────────────────────────────────────────────────────────
 
   private setupDPad() {
-    this.dpad = new DPad((dx, dy) => this.movePlayerInDirection(dx, dy));
+    this.dpad = new DPad(
+      (dx, dy) => this.movePlayerInDirection(dx, dy),
+      () => {
+        if (this.phase !== 'player' || this.mode !== 'free') return;
+        this.addMessage('You wait.');
+        this.endPlayerTurn();
+      },
+    );
     this.uiLayer.addChild(this.dpad.container);
   }
 
@@ -356,13 +364,6 @@ export class Game {
       const rect  = canvas.getBoundingClientRect();
       const scale = this.app.screen.width / rect.width;
       return [(clientX - rect.left) * scale, (clientY - rect.top) * scale] as const;
-    };
-
-    // Re-enable camera whenever action menu closes
-    const origClose = this.actionMenu.close.bind(this.actionMenu);
-    this.actionMenu.close = () => {
-      origClose();
-      this.camera.disabled = false;
     };
 
     // ── Map taps (inspect / cast) ──────────────────────────────────────
