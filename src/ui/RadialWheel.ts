@@ -26,7 +26,8 @@ export interface WheelNode {
   children?: WheelNode[];
   action?: () => void;
   disabled?: boolean;
-  badge?: string;    // small overlay (e.g. cooldown number)
+  badge?: string;    // small overlay (e.g. charge count)
+  tooltip?: string;  // description shown when hovered (multiline ok)
 }
 
 // Ring radii
@@ -220,6 +221,32 @@ export class RadialWheel {
           this.txt(lbl, lx, ly + 8, 8, lblFill, false);
         }
       }
+    }
+
+    // ── Spell description tooltip ──────────────────────────────────────
+    // Show tooltip for the currently hovered spell child (or root if leaf)
+    let tooltipText: string | undefined;
+    let tooltipColor = 0xffffff;
+    if (this.hoveredRootIdx >= 0) {
+      const hovRoot = this.nodes[this.hoveredRootIdx];
+      if (hovRoot?.children?.length && this.hoveredChildIdx >= 0) {
+        const hovChild = hovRoot.children[this.hoveredChildIdx];
+        tooltipText = hovChild?.tooltip;
+        tooltipColor = hovChild?.color ?? 0xffffff;
+      } else if (!hovRoot?.children?.length) {
+        tooltipText = hovRoot?.tooltip;
+        tooltipColor = hovRoot?.color ?? 0xffffff;
+      }
+    }
+    if (tooltipText) {
+      const tipY = cy + OUTER_R + 18;
+      const tipW = 220;
+      const tipH = 52;
+      this.gfx
+        .roundRect(cx - tipW / 2, tipY, tipW, tipH, 6)
+        .fill({ color: 0x0d1825, alpha: 0.93 })
+        .stroke({ color: tooltipColor, alpha: 0.55, width: 1.5 });
+      this.txt(tooltipText, cx, tipY + tipH / 2, 11, 0xddeeff, false);
     }
 
     // ── Centre button ──────────────────────────────────────────────────

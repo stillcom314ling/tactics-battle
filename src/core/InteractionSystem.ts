@@ -1,25 +1,22 @@
 /**
  * INTERACTION SYSTEM
- * 
+ *
  * This is where emergent gameplay lives. Define rules like:
  *   - "burning" + "standing on oil" = tile catches fire
  *   - "wet" + "lightning attack" = double damage + stun
- *   - "frozen" + "hit" = shatter (bonus damage)
- * 
+ *   - "burning" entity = takes 3 damage per turn
+ *   - "poisoned" entity = takes 2 damage per turn
+ *
  * Rules are simple predicate -> effect pairs.
  * Add more rules to get more emergent interactions.
- * 
- * Claude Code: this is the file to extend when adding new mechanics.
  */
 
-import { EntityId, World, StatusEffect, Terrain, Position, Health } from './ECS';
+import { EntityId, World, StatusEffect, Terrain, Position, Health, applyStatus } from './ECS';
 
 export interface InteractionRule {
   name: string;
   description: string;
-  /** Check if this rule applies */
   predicate: (world: World, entityId: EntityId, context: InteractionContext) => boolean;
-  /** Apply the effect */
   effect: (world: World, entityId: EntityId, context: InteractionContext) => void;
 }
 
@@ -30,12 +27,48 @@ export interface InteractionContext {
   sourceId?: EntityId;
   /** Additional data */
   data?: Record<string, unknown>;
+  /** Log a combat message */
+  addMessage?: (msg: string) => void;
 }
 
 /**
- * Registry of all interaction rules. Add new rules here for emergent mechanics.
+ * Registry of all interaction rules.
  */
 export const INTERACTION_RULES: InteractionRule[] = [
+  {
+    name: 'burning_entity_damage',
+    description: 'Burning entities take 3 damage per turn',
+    predicate: (world, entityId, ctx) => {
+      if (ctx.trigger !== 'turn_start') return false;
+      const status = world.getComponent<StatusEffect>(entityId, 'status');
+      return status?.effects.has('burning') ?? false;
+    },
+    effect: (world, entityId, ctx) => {
+      const health = world.getComponent<Health>(entityId, 'health');
+      if (health) {
+        health.current -= 3;
+        ctx.addMessage?.(`🔥 Burning deals 3 damage!`);
+      }
+    },
+  },
+
+  {
+    name: 'poisoned_entity_damage',
+    description: 'Poisoned entities take 2 damage per turn',
+    predicate: (world, entityId, ctx) => {
+      if (ctx.trigger !== 'turn_start') return false;
+      const status = world.getComponent<StatusEffect>(entityId, 'status');
+      return status?.effects.has('poisoned') ?? false;
+    },
+    effect: (world, entityId, ctx) => {
+      const health = world.getComponent<Health>(entityId, 'health');
+      if (health) {
+        health.current -= 2;
+        ctx.addMessage?.(`☠ Poison deals 2 damage!`);
+      }
+    },
+  },
+
   {
     name: 'fire_spreads_to_oil',
     description: 'Burning entity standing on flammable terrain ignites it',
@@ -44,7 +77,6 @@ export const INTERACTION_RULES: InteractionRule[] = [
       const pos = world.getComponent<Position>(entityId, 'position');
       if (!status?.effects.has('burning') || !pos) return false;
 
-      // Check terrain at this position
       const terrainEntities = world.query('terrain', 'position');
       for (const tid of terrainEntities) {
         const tpos = world.getComponent<Position>(tid, 'position')!;
@@ -64,7 +96,6 @@ export const INTERACTION_RULES: InteractionRule[] = [
         if (tpos.col === pos.col && tpos.row === pos.row && terrain.properties.has('flammable')) {
           terrain.properties.delete('flammable');
           terrain.properties.add('on_fire');
-          console.log(`[interaction] fire spread to terrain at ${pos.col},${pos.row}`);
         }
       }
     },
@@ -82,21 +113,20 @@ export const INTERACTION_RULES: InteractionRule[] = [
       const health = world.getComponent<Health>(entityId, 'health');
       const status = world.getComponent<StatusEffect>(entityId, 'status');
       if (health && ctx.data?.['damage']) {
-        // Double the damage
         health.current -= ctx.data['damage'] as number;
-        console.log(`[interaction] wet+lightning: bonus damage to entity ${entityId}`);
+        ctx.addMessage?.(`⚡ Wet+Lightning: bonus damage!`);
       }
       if (status) {
-        status.effects.add('stunned');
-        status.effects.delete('wet'); // water evaporates
-        console.log(`[interaction] wet+lightning: entity ${entityId} stunned`);
+        applyStatus(status, 'stunned', 1);
+        status.effects.delete('wet');
+        ctx.addMessage?.(`⚡ Electrocuted — stunned!`);
       }
     },
   },
 
   {
     name: 'fire_terrain_damage',
-    description: 'Standing on burning terrain deals damage each turn',
+    description: 'Standing on burning terrain deals 5 damage and applies burning',
     predicate: (world, entityId, ctx) => {
       if (ctx.trigger !== 'turn_start') return false;
       const pos = world.getComponent<Position>(entityId, 'position');
@@ -112,16 +142,14 @@ export const INTERACTION_RULES: InteractionRule[] = [
       }
       return false;
     },
-    effect: (world, entityId) => {
+    effect: (world, entityId, ctx) => {
       const health = world.getComponent<Health>(entityId, 'health');
       if (health) {
         health.current -= 5;
-        console.log(`[interaction] fire terrain deals 5 damage to entity ${entityId}`);
+        ctx.addMessage?.(`🔥 Burning floor deals 5 damage!`);
       }
       const status = world.getComponent<StatusEffect>(entityId, 'status');
-      if (status) {
-        status.effects.add('burning');
-      }
+      if (status) applyStatus(status, 'burning', 3);
     },
   },
 ];

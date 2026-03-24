@@ -1,10 +1,10 @@
 /**
  * ENTITY-COMPONENT SYSTEM (lightweight)
- * 
+ *
  * Not a full ECS library — just enough structure for emergent tactical mechanics.
  * Entities are just IDs. Components are plain objects stored by type.
  * Systems are functions that iterate over entities with specific components.
- * 
+ *
  * This keeps things simple for Claude Code to extend while still enabling
  * the composable "Fire + Oil = Explosion" interaction patterns you want.
  */
@@ -45,10 +45,35 @@ export interface Faction extends Component {
   team: 'player' | 'enemy' | 'neutral';
 }
 
-// --- STATUS EFFECTS (for emergent interactions) ---
+// --- STATUS EFFECTS ---
+// effects: Map of effect name → turns remaining (-1 = permanent until cleared)
 export interface StatusEffect extends Component {
   type: 'status';
-  effects: Set<string>; // e.g. 'burning', 'wet', 'stunned', 'poisoned'
+  effects: Map<string, number>;
+}
+
+// Default durations for each status effect
+export const STATUS_DURATIONS: Record<string, number> = {
+  burning:  3,
+  poisoned: 4,
+  slowed:   2,
+  stunned:  1,
+  shocked:  1,
+  wet:      3,
+};
+
+/** Apply a status effect, keeping the longer duration if already present. */
+export function applyStatus(status: StatusEffect, effect: string, turns: number): void {
+  const existing = status.effects.get(effect) ?? 0;
+  if (existing < turns) status.effects.set(effect, turns);
+}
+
+/** Tick all status durations down by 1, removing expired effects. */
+export function tickStatuses(status: StatusEffect): void {
+  for (const [eff, turns] of status.effects) {
+    if (turns <= 1) status.effects.delete(eff);
+    else status.effects.set(eff, turns - 1);
+  }
 }
 
 // --- MOVEMENT ---
@@ -75,6 +100,8 @@ export interface Terrain extends Component {
 }
 
 // --- ABILITY (a single spell / skill) ---
+// Uses per-level charges instead of per-turn cooldowns.
+// Charges refill at the start of each new level.
 export interface Ability {
   id: string;
   name: string;
@@ -83,15 +110,24 @@ export interface Ability {
   pattern: 'single' | 'line' | 'aoe' | 'self';
   aoeRadius?: number;
   damage: number;
-  effects: string[]; // status labels to apply: 'burning', 'wet', 'stunned', etc.
-  cooldownMax: number;
-  cooldownCurrent: number;
+  effects: string[]; // status labels to apply on hit
+  charges: number;     // remaining uses this level
+  chargesMax: number;  // total uses per level
 }
 
 // --- ABILITIES (entity's spell list) ---
 export interface Abilities extends Component {
   type: 'abilities';
   list: Ability[];
+}
+
+// --- AI (enemy behaviour strategy) ---
+export interface AI extends Component {
+  type: 'ai';
+  strategy: 'basic' | 'ranged' | 'brute' | 'swarm';
+  alerted: boolean;    // true = rush player regardless of normal caution
+  alertRange: number;  // passive detection radius
+  moveCounter: number; // brute: skips movement every other turn
 }
 
 // --- LABEL ---
