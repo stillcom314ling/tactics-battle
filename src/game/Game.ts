@@ -23,7 +23,7 @@ import { DPad } from '../ui/DPad';
 import { ActionMenu, ActiveItem } from '../ui/ActionMenu';
 import { generateMap, populateWorld, GeneratedMap } from './MapGenerator';
 import { processInteractions } from '../core/InteractionSystem';
-import { resolveSpell, getRangeTiles } from './SpellSystem';
+import { resolveSpell, getRangeTiles, getSpellTiles } from './SpellSystem';
 
 const MAP_W     = 32;
 const MAP_H     = 22;
@@ -64,6 +64,9 @@ export class Game {
   private mode:  GameMode   = 'free';
   private selectedAbility: Ability | null = null;
   private highlightTiles: [number, number][] = [];
+  private spellPreviewTiles: [number, number][] = [];
+  private pendingTargetCol: number | null = null;
+  private pendingTargetRow: number | null = null;
 
   private turnCount: number = 0;
   private messages: string[] = [];
@@ -77,6 +80,7 @@ export class Game {
 
   private dpad!: DPad;
   private actionMenu!: ActionMenu;
+  private menuJustOpened = false;
   private tooltip!: TooltipOverlay;
   private entityOverlayGfx!: Graphics; // per-entity HP bars drawn each frame
   private hitFilter!: ColorMatrixFilter;
@@ -187,7 +191,12 @@ export class Game {
     (this.modeText.style as TextStyle).wordWrapWidth = sw - 20;
     if (this.mode === 'targeting' && this.selectedAbility) {
       const a = this.selectedAbility;
-      this.modeText.text = `▶ ${a.name}  •  tap enemy to cast\ntap your tile (@) to cancel`;
+      const needsPreview = a.pattern === 'aoe' || a.pattern === 'line';
+      if (needsPreview && this.pendingTargetCol !== null) {
+        this.modeText.text = `▶ ${a.name}  •  tap again to cast\ntap your tile (@) to cancel`;
+      } else {
+        this.modeText.text = `▶ ${a.name}  •  tap target tile\ntap your tile (@) to cancel`;
+      }
     } else {
       this.modeText.text = '';
     }
@@ -223,6 +232,8 @@ export class Game {
       if (this.actionMenu.isOpen) { this.actionMenu.close(); return; }
       this.tooltip.hide();
       const sw = this.app.screen.width, sh = this.app.screen.height;
+      this.menuJustOpened = true;
+      requestAnimationFrame(() => requestAnimationFrame(() => { this.menuJustOpened = false; }));
       this.actionMenu.open(this.buildActiveItems(), sw, sh, () => {
         this.camera.disabled = false;
       });
@@ -324,7 +335,7 @@ export class Game {
   }
 
   private cancelTargeting() {
-    this.clearRangeHighlight();
+    this.clearRangeHighlight(); // also clears spellPreview + pending
     this.mode = 'free';
     this.selectedAbility = null;
     this.addMessage('Cancelled.');
@@ -351,9 +362,62 @@ export class Game {
   }
 
   private clearRangeHighlight() {
+    this.clearSpellPreview();
     for (const [c, r] of this.highlightTiles) this.restoreTerrain(c, r);
     this.drawActors();
     this.highlightTiles = [];
+  }
+
+  /** Show blast-radius preview for aoe/line spells centered on (col, row). */
+  private showSpellPreview(col: number, row: number) {
+    this.clearSpellPreview();
+    if (!this.selectedAbility) return;
+    const { pattern } = this.selectedAbility;
+    if (pattern !== 'aoe' && pattern !== 'line') return;
+
+    const pos   = this.world.getComponent<Position>(this.playerId, 'position')!;
+    const color = ELEMENT_COLOR[this.selectedAbility.element] ?? 0xffffff;
+    const tiles = getSpellTiles(pos.col, pos.row, col, row, this.selectedAbility, this.mapData);
+
+    for (const [c, r] of tiles) {
+      this.spellPreviewTiles.push([c, r]);
+      const actor = this.getActorAt(c, r, 'enemy');
+      if (actor !== null) {
+        const rend = this.world.getComponent<Renderable>(actor, 'renderable')!;
+        this.renderer.setCell('gameplay', c, r, { char: rend.char, fg: color, alpha: 1.0 });
+      } else {
+        this.renderer.setCell('gameplay', c, r, { char: '*', fg: color, alpha: 0.85 });
+      }
+    }
+  }
+
+  /** Restore preview tiles back to range highlight or terrain. */
+  private clearSpellPreview() {
+    for (const [c, r] of this.spellPreviewTiles) {
+      const inRange = this.highlightTiles.some(([hc, hr]) => hc === c && hr === r);
+      if (inRange) {
+        const actor = this.getActorAt(c, r, 'enemy');
+        const color = ELEMENT_COLOR[this.selectedAbility?.element ?? 'none'] ?? 0xffffff;
+        if (actor !== null) {
+          const rend = this.world.getComponent<Renderable>(actor, 'renderable')!;
+          this.renderer.setCell('gameplay', c, r, { char: rend.char, fg: color, alpha: 0.9 });
+        } else {
+          this.renderer.setCell('gameplay', c, r, { char: '·', fg: color, alpha: 0.55 });
+        }
+      } else {
+        this.restoreTerrain(c, r);
+        // Redraw any actor on this tile
+        const actor = this.getActorAt(c, r);
+        if (actor !== null) {
+          const pos  = this.world.getComponent<Position>(actor, 'position')!;
+          const rend = this.world.getComponent<Renderable>(actor, 'renderable')!;
+          this.renderer.setCell('gameplay', pos.col, pos.row, { char: rend.char, fg: rend.fg, alpha: rend.alpha ?? 1.0 });
+        }
+      }
+    }
+    this.spellPreviewTiles = [];
+    this.pendingTargetCol  = null;
+    this.pendingTargetRow  = null;
   }
 
   // ─── INPUT ────────────────────────────────────────────────────────────────
@@ -368,7 +432,7 @@ export class Game {
 
     // ── Map taps (inspect / cast) ──────────────────────────────────────
     canvas.addEventListener('click', (e) => {
-      if (this.camera.hasDragged) return;
+      if (this.camera.hasDragged || this.menuJustOpened) return;
       if (this.actionMenu.isOpen) { this.actionMenu.close(); return; }
       const [x, y] = toCanvas(e.clientX, e.clientY);
       this.handleTap(x, y);
@@ -381,7 +445,7 @@ export class Game {
     }, { passive: true });
 
     canvas.addEventListener('touchend', (e) => {
-      if (this.camera.hasDragged) return;
+      if (this.camera.hasDragged || this.menuJustOpened) return;
       const t = e.changedTouches[0];
       if (Math.hypot(t.clientX - touchStartX, t.clientY - touchStartY) > 8) return;
       if (this.actionMenu.isOpen) { this.actionMenu.close(); return; }
@@ -428,6 +492,21 @@ export class Game {
         this.addMessage('Out of range.');
         return;
       }
+
+      const needsPreview = this.selectedAbility!.pattern === 'aoe' || this.selectedAbility!.pattern === 'line';
+      if (needsPreview) {
+        const sameTile = col === this.pendingTargetCol && row === this.pendingTargetRow;
+        if (!sameTile) {
+          // First tap: show preview and wait for second tap
+          this.pendingTargetCol = col;
+          this.pendingTargetRow = row;
+          this.showSpellPreview(col, row);
+          this.addMessage(`Tap again to cast ${this.selectedAbility!.name}.`);
+          return;
+        }
+        // Second tap on same tile: cast
+      }
+
       this.clearRangeHighlight();
       resolveSpell(this.world, this.playerId, this.selectedAbility!, col, row, this.mapData, this.addMessage.bind(this));
       this.alertEnemies(playerPos.col, playerPos.row, 5);

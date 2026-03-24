@@ -45,15 +45,18 @@ export class ActionMenu {
   private scrollContent: Container;  // scrollable inner content
   private scrollMask: Graphics;
   private headerLayer: Container;    // fixed header (not scrolled)
+  private scrollBarGfx: Graphics | null = null;
 
   private _isOpen    = false;
   private scrollY    = 0;
   private contentH   = 0;
   private visibleH   = 0;
+  private scrollBarTrackH = 0;
 
-  private dragStartY = 0;
-  private dragScrollStart = 0;
-  private dragging   = false;
+  // Drag tracking — all in clientY (DOM pixel) space
+  private dragStartClientY = 0;
+  private dragScrollStart  = 0;
+  private dragging         = false;
 
   private panelX = 0;
   private panelY = 0;
@@ -91,15 +94,10 @@ export class ActionMenu {
     this.headerLayer.eventMode = 'passive';
     this.container.addChild(this.headerLayer);
 
-    // Drag-to-scroll listeners on the scroll content
-    this.scrollContent.on('pointerdown', (e) => {
-      this.dragging = true;
-      this.dragStartY = e.global.y;
-      this.dragScrollStart = this.scrollY;
-    });
+    // Drag-to-scroll: started via blocker pointerdown inside open(), tracked here
     window.addEventListener('pointermove', (e) => {
       if (!this.dragging) return;
-      const dy = e.clientY - this.dragStartY;
+      const dy = e.clientY - this.dragStartClientY;
       this.setScroll(this.dragScrollStart - dy);
     });
     window.addEventListener('pointerup', () => { this.dragging = false; });
@@ -168,7 +166,8 @@ export class ActionMenu {
     blocker.eventMode = 'static';
     blocker.on('pointerdown', (e) => {
       this.dragging = true;
-      this.dragStartY = (e as any).global?.y ?? (e as any).clientY ?? 0;
+      // Use clientY (DOM viewport pixels) — consistent with window.pointermove e.clientY
+      this.dragStartClientY = (e as any).clientY ?? (e as any).originalEvent?.clientY ?? e.global.y;
       this.dragScrollStart = this.scrollY;
       e.stopPropagation();
     });
@@ -221,6 +220,10 @@ export class ActionMenu {
     this.panelBg.clear();
     this.backdrop.clear();
     this.scrollMask.clear();
+    if (this.scrollBarGfx) {
+      this.container.removeChild(this.scrollBarGfx);
+      this.scrollBarGfx = null;
+    }
     const cb = this.onCloseCb;
     this.onCloseCb = null;
     cb?.();
@@ -235,10 +238,7 @@ export class ActionMenu {
     this.updateScrollBar();
   }
 
-  private scrollBarGfx: Graphics | null = null;
-  private scrollBarTrackH = 0;
-
-  private drawScrollBar(panelH: number) {
+  private drawScrollBar(_panelH: number) {
     const g = new Graphics();
     this.scrollBarGfx = g;
     this.scrollBarTrackH = this.visibleH - 8;
