@@ -19,10 +19,11 @@ import { ParallaxAsciiRenderer } from '../rendering/ParallaxAsciiRenderer';
 import { CameraController } from '../rendering/CameraController';
 import { World, Position, Renderable, Health, Faction, Combat, Ability, Abilities, StatusEffect, AI, tickStatuses } from '../core/ECS';
 import { TooltipOverlay } from '../ui/TooltipOverlay';
+import { DPad } from '../ui/DPad';
+import { ActionMenu, ActiveItem } from '../ui/ActionMenu';
 import { generateMap, populateWorld, GeneratedMap } from './MapGenerator';
 import { processInteractions } from '../core/InteractionSystem';
 import { resolveSpell, getRangeTiles } from './SpellSystem';
-import { RadialWheel, WheelNode } from '../ui/RadialWheel';
 
 const MAP_W     = 32;
 const MAP_H     = 22;
@@ -67,17 +68,15 @@ export class Game {
   private turnCount: number = 0;
   private messages: string[] = [];
 
-  private wheelDragging   = false;
-  private wheelJustClosed = false;
-
   private hudText!: Text;
   private msgText!: Text;
   private modeText!: Text;   // shows current mode / targeting hint
-  private fabGfx!: Graphics; // floating action button
-  private fabLabel!: Text;
+  private actionBtnGfx!: Graphics; // action button (bottom-right)
+  private actionBtnLabel!: Text;
   private uiLayer!: Container; // fixed overlay (not in parallax)
 
-  private wheel!: RadialWheel;
+  private dpad!: DPad;
+  private actionMenu!: ActionMenu;
   private tooltip!: TooltipOverlay;
   private entityOverlayGfx!: Graphics; // per-entity HP bars drawn each frame
   private hitFilter!: ColorMatrixFilter;
@@ -139,14 +138,15 @@ export class Game {
     this.app.stage.addChild(this.uiLayer);
 
     this.setupHUD();
-    this.setupFAB();
-    this.setupWheel();
+    this.setupActionButton();
+    this.setupActionMenu();
+    this.setupDPad();
     this.setupTooltip();
     this.setupInput();
     this.setupEntityOverlay();
 
-    this.addMessage('Hold ⚡ and drag to select an action.');
-    this.addMessage('Tap a floor tile to move.');
+    this.addMessage('Use d-pad to move. Tap ☰ for actions.');
+    this.addMessage('Tap an enemy or yourself to inspect.');
   }
 
   // ─── HUD ───────────────────────────────────────────────────────────────────
@@ -192,12 +192,16 @@ export class Game {
       this.modeText.text = '';
     }
 
-    // FAB position (bottom-right, above thumb area)
-    if (this.fabGfx) {
-      this.fabGfx.x = sw - 60;
-      this.fabGfx.y = sh - 70;
-      this.fabLabel.x = sw - 60;
-      this.fabLabel.y = sh - 70;
+    // Action button position (bottom-right, above thumb area)
+    if (this.actionBtnGfx) {
+      this.actionBtnGfx.x = sw - 60;
+      this.actionBtnGfx.y = sh - 70;
+      this.actionBtnLabel.x = sw - 60;
+      this.actionBtnLabel.y = sh - 70;
+    }
+    // D-pad position (bottom-left)
+    if (this.dpad) {
+      this.dpad.resize(20, sh - 138);
     }
   }
 
@@ -206,48 +210,65 @@ export class Game {
     if (this.messages.length > 6) this.messages.pop();
   }
 
-  // ─── FAB (floating action button) ─────────────────────────────────────────
+  // ─── ACTION BUTTON (bottom-right) ─────────────────────────────────────────
 
-  private setupFAB() {
-    this.fabGfx = new Graphics();
-    this.fabGfx.circle(0, 0, 34).fill({ color: 0x112244, alpha: 0.92 }).stroke({ color: 0x3366bb, alpha: 0.85, width: 2.5 });
-    this.fabGfx.eventMode = 'static';
-    this.fabGfx.cursor    = 'pointer';
-    this.fabGfx.on('pointerdown', (e) => {
+  private setupActionButton() {
+    this.actionBtnGfx = new Graphics();
+    this.actionBtnGfx.circle(0, 0, 34).fill({ color: 0x112244, alpha: 0.92 }).stroke({ color: 0x3366bb, alpha: 0.85, width: 2.5 });
+    this.actionBtnGfx.eventMode = 'static';
+    this.actionBtnGfx.cursor    = 'pointer';
+    this.actionBtnGfx.on('pointerdown', (e) => {
       e.stopPropagation();
       if (this.phase !== 'player' || this.mode !== 'free') return;
+      if (this.actionMenu.isOpen) { this.actionMenu.close(); return; }
       this.tooltip.hide();
-      this.wheel.open(
-        this.buildWheelNodes(),
-        this.app.screen.width  / 2,
-        this.app.screen.height / 2,
-        () => {
-          // Prevent the canvas click/tap that fires after pointerup from
-          // being misread as a map tap.
-          this.wheelJustClosed = true;
-          requestAnimationFrame(() => requestAnimationFrame(() => {
-            this.wheelJustClosed = false;
-          }));
-        },
-      );
-      this.wheelDragging    = true;
-      this.camera.disabled  = true;
+      const sw = this.app.screen.width, sh = this.app.screen.height;
+      this.actionMenu.open(this.buildActiveItems(), sw, sh);
+      this.camera.disabled = true;
     });
 
-    const style = new TextStyle({ fontFamily: '"Courier New", monospace', fontSize: 22, fill: 0x6699ff, fontWeight: 'bold' });
-    this.fabLabel = new Text({ text: '⚡', style });
-    this.fabLabel.anchor.set(0.5);
-    this.fabLabel.eventMode = 'none';
+    const style = new TextStyle({ fontFamily: '"Courier New", monospace', fontSize: 20, fill: 0x6699ff, fontWeight: 'bold' });
+    this.actionBtnLabel = new Text({ text: '☰', style });
+    this.actionBtnLabel.anchor.set(0.5);
+    this.actionBtnLabel.eventMode = 'none';
 
-    this.uiLayer.addChild(this.fabGfx);
-    this.uiLayer.addChild(this.fabLabel);
+    this.uiLayer.addChild(this.actionBtnGfx);
+    this.uiLayer.addChild(this.actionBtnLabel);
   }
 
-  // ─── WHEEL ────────────────────────────────────────────────────────────────
+  // ─── ACTION MENU ──────────────────────────────────────────────────────────
 
-  private setupWheel() {
-    this.wheel = new RadialWheel();
-    this.uiLayer.addChild(this.wheel.container);
+  private setupActionMenu() {
+    this.actionMenu = new ActionMenu();
+    this.actionMenu.container.eventMode = 'static';
+    this.uiLayer.addChild(this.actionMenu.container);
+  }
+
+  // ─── D-PAD ────────────────────────────────────────────────────────────────
+
+  private setupDPad() {
+    this.dpad = new DPad((dx, dy) => this.movePlayerInDirection(dx, dy));
+    this.uiLayer.addChild(this.dpad.container);
+  }
+
+  /** Move player one step in direction (dx, dy). Called by DPad. */
+  private movePlayerInDirection(dx: number, dy: number) {
+    if (this.phase !== 'player' || this.mode !== 'free') return;
+    const playerStatus = this.world.getComponent<StatusEffect>(this.playerId, 'status');
+    if (playerStatus?.effects.has('stunned')) {
+      this.addMessage('You are stunned and lose your turn!');
+      this.endPlayerTurn();
+      return;
+    }
+    const pos = this.world.getComponent<Position>(this.playerId, 'position')!;
+    const nc = pos.col + dx;
+    const nr = pos.row + dy;
+    if (nc < 0 || nc >= MAP_W || nr < 0 || nr >= MAP_H) return;
+    if (!this.mapData.walkable[nr]?.[nc]) return;
+    if (this.getActorAt(nc, nr, 'enemy') !== null) return; // no bump-attack
+    this.tooltip.hide();
+    this.moveEntity(this.playerId, nc, nr);
+    this.endPlayerTurn();
   }
 
   private setupTooltip() {
@@ -270,53 +291,19 @@ export class Game {
     ];
   }
 
-  private buildWheelNodes(): WheelNode[] {
+  private buildActiveItems(): ActiveItem[] {
     const abilities = this.world.getComponent<Abilities>(this.playerId, 'abilities');
-    const spellNodes: WheelNode[] = abilities
-      ? abilities.list.map(a => ({
-          id: a.id,
-          label: a.name,
-          icon: this.spellIcon(a),
-          color: ELEMENT_COLOR[a.element] ?? 0x888888,
-          disabled: a.charges <= 0,
-          badge: `${a.charges}/${a.chargesMax}`,
-          tooltip: `DMG: ${a.damage}  RNG: ${a.range}  CHARGES: ${a.charges}/${a.chargesMax}${a.effects.length ? '\n' + a.effects.join(', ') : ''}`,
-          action: () => this.enterTargeting(a),
-        }))
-      : [];
-
-    const root: WheelNode[] = [
-      {
-        id: 'wait',
-        label: 'Wait',
-        icon: '…',
-        color: 0x446644,
-        action: () => this.endPlayerTurn(),
-      },
-    ];
-
-    if (spellNodes.length > 0) {
-      root.unshift({
-        id: 'spells',
-        label: 'Spells',
-        icon: '✦',
-        color: 0x334488,
-        children: spellNodes,
-      });
-    }
-
-    return root;
-  }
-
-  private spellIcon(a: Ability): string {
-    switch (a.element) {
-      case 'fire':      return '🔥';
-      case 'lightning': return '⚡';
-      case 'ice':       return '❄';
-      case 'poison':    return '☠';
-      case 'arcane':    return '✦';
-      default:          return '·';
-    }
+    if (!abilities) return [];
+    return abilities.list.map(a => ({
+      id:         a.id,
+      name:       a.name,
+      element:    a.element,
+      charges:    a.charges,
+      chargesMax: a.chargesMax,
+      color:      ELEMENT_COLOR[a.element] ?? 0x888888,
+      tooltip:    `DMG ${a.damage}  RNG ${a.range}${a.effects.length ? '  ' + a.effects.join(', ') : ''}`,
+      action:     () => this.enterTargeting(a),
+    }));
   }
 
   // ─── TARGETING MODE ───────────────────────────────────────────────────────
@@ -371,23 +358,17 @@ export class Game {
       return [(clientX - rect.left) * scale, (clientY - rect.top) * scale] as const;
     };
 
-    // ── Wheel drag: window-level so pointer can leave the FAB ──────────
-    window.addEventListener('pointermove', (e) => {
-      if (!this.wheelDragging) return;
-      const [x, y] = toCanvas(e.clientX, e.clientY);
-      this.wheel.update(x, y);
-    });
-
-    window.addEventListener('pointerup', () => {
-      if (!this.wheelDragging) return;
-      this.wheel.commit();
-      this.wheelDragging   = false;
+    // Re-enable camera whenever action menu closes
+    const origClose = this.actionMenu.close.bind(this.actionMenu);
+    this.actionMenu.close = () => {
+      origClose();
       this.camera.disabled = false;
-    });
+    };
 
-    // ── Map taps (move / cast) ─────────────────────────────────────────
+    // ── Map taps (inspect / cast) ──────────────────────────────────────
     canvas.addEventListener('click', (e) => {
-      if (this.camera.hasDragged || this.wheelJustClosed) return;
+      if (this.camera.hasDragged) return;
+      if (this.actionMenu.isOpen) { this.actionMenu.close(); return; }
       const [x, y] = toCanvas(e.clientX, e.clientY);
       this.handleTap(x, y);
     });
@@ -399,9 +380,10 @@ export class Game {
     }, { passive: true });
 
     canvas.addEventListener('touchend', (e) => {
-      if (this.camera.hasDragged || this.wheelJustClosed || this.wheelDragging) return;
+      if (this.camera.hasDragged) return;
       const t = e.changedTouches[0];
       if (Math.hypot(t.clientX - touchStartX, t.clientY - touchStartY) > 8) return;
+      if (this.actionMenu.isOpen) { this.actionMenu.close(); return; }
       const [x, y] = toCanvas(t.clientX, t.clientY);
       this.handleTap(x, y);
     }, { passive: true });
