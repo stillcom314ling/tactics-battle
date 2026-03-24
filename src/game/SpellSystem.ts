@@ -9,25 +9,54 @@
  *   line   — Bresenham line from caster to target
  *   aoe    — circle of aoeRadius around target
  *   self   — caster's tile only
+ *
+ * Spells use per-level CHARGES instead of per-turn cooldowns.
+ * This rewards aggressive forward play — no reason to wait between rooms.
+ * Charges refill when populateWorld() is called for a new level.
  */
 
-import { World, EntityId, Ability, Abilities, Position, Health, StatusEffect } from '../core/ECS';
+import { World, EntityId, Ability, Abilities, Position, Health, StatusEffect, applyStatus, STATUS_DURATIONS } from '../core/ECS';
 import { processInteractions } from '../core/InteractionSystem';
 import { GeneratedMap } from './MapGenerator';
 
 // ─── STARTER SPELLS ─────────────────────────────────────────────────────────
+// Balance note: all spells available simultaneously for testing.
+// In production these will be unlocked/slotted one at a time.
 
 export function makeFlameBolt(): Ability {
-  return { id: 'flame_bolt', name: 'Flame Bolt', element: 'fire', range: 5,
-    pattern: 'single', damage: 8, effects: ['burning'], cooldownMax: 2, cooldownCurrent: 0 };
+  return {
+    id: 'flame_bolt', name: 'Flame Bolt', element: 'fire',
+    range: 5, pattern: 'single', damage: 10,
+    effects: ['burning'],
+    charges: 3, chargesMax: 3,
+  };
 }
+
 export function makeArcLightning(): Ability {
-  return { id: 'arc_lightning', name: 'Arc Lightning', element: 'lightning', range: 4,
-    pattern: 'line', damage: 6, effects: ['shocked'], cooldownMax: 3, cooldownCurrent: 0 };
+  return {
+    id: 'arc_lightning', name: 'Arc Lightning', element: 'lightning',
+    range: 5, pattern: 'line', damage: 7,
+    effects: ['shocked'],
+    charges: 2, chargesMax: 2,
+  };
 }
+
 export function makeFrostShard(): Ability {
-  return { id: 'frost_shard', name: 'Frost Shard', element: 'ice', range: 4,
-    pattern: 'single', damage: 5, effects: ['wet', 'slowed'], cooldownMax: 2, cooldownCurrent: 0 };
+  return {
+    id: 'frost_shard', name: 'Frost Shard', element: 'ice',
+    range: 4, pattern: 'single', damage: 6,
+    effects: ['wet', 'slowed'],
+    charges: 3, chargesMax: 3,
+  };
+}
+
+export function makePoisonCloud(): Ability {
+  return {
+    id: 'poison_cloud', name: 'Poison Cloud', element: 'poison',
+    range: 4, pattern: 'aoe', aoeRadius: 2, damage: 4,
+    effects: ['poisoned'],
+    charges: 2, chargesMax: 2,
+  };
 }
 
 // ─── TILE GEOMETRY ──────────────────────────────────────────────────────────
@@ -63,7 +92,6 @@ export function getSpellTiles(
     }
 
     case 'line': {
-      // Bresenham from caster to target, excluding caster tile
       const tiles: [number, number][] = [];
       let x = casterCol, y = casterRow;
       const dx = Math.abs(targetCol - x), dy = Math.abs(targetRow - y);
@@ -135,7 +163,9 @@ export function resolveSpell(
 
       const status = world.getComponent<StatusEffect>(targetId, 'status');
       if (status) {
-        for (const eff of ability.effects) status.effects.add(eff);
+        for (const eff of ability.effects) {
+          applyStatus(status, eff, STATUS_DURATIONS[eff] ?? 3);
+        }
       }
 
       // Run synergy rules (wet+lightning, burning+terrain, etc.)
@@ -143,6 +173,7 @@ export function resolveSpell(
         trigger: 'attack',
         sourceId: caster,
         data: { element: ability.element, damage: ability.damage },
+        addMessage,
       });
 
       if (health.current <= 0) {
@@ -157,16 +188,16 @@ export function resolveSpell(
 
   if (hitCount === 0) addMessage(`${ability.name} hits nothing.`);
 
-  // Start cooldown
-  ability.cooldownCurrent = ability.cooldownMax;
+  // Spend a charge
+  ability.charges = Math.max(0, ability.charges - 1);
 }
 
-/** Tick all ability cooldowns down by 1 (call at end of each full turn). */
-export function tickCooldowns(world: World): void {
+/** Refill all spell charges (call when starting a new level). */
+export function refillSpellCharges(world: World): void {
   for (const id of world.query('abilities')) {
     const abs = world.getComponent<Abilities>(id, 'abilities')!;
     for (const a of abs.list) {
-      if (a.cooldownCurrent > 0) a.cooldownCurrent--;
+      a.charges = a.chargesMax;
     }
   }
 }

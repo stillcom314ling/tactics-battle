@@ -17,11 +17,11 @@ import { Application, Text, TextStyle, Graphics, Container } from 'pixi.js';
 import * as ROT from 'rot-js';
 import { ParallaxAsciiRenderer } from '../rendering/ParallaxAsciiRenderer';
 import { CameraController } from '../rendering/CameraController';
-import { World, Position, Renderable, Health, Faction, Combat, Ability, Abilities, StatusEffect } from '../core/ECS';
+import { World, Position, Renderable, Health, Faction, Combat, Ability, Abilities, StatusEffect, AI, tickStatuses } from '../core/ECS';
 import { TooltipOverlay } from '../ui/TooltipOverlay';
 import { generateMap, populateWorld, GeneratedMap } from './MapGenerator';
 import { processInteractions } from '../core/InteractionSystem';
-import { resolveSpell, getRangeTiles, tickCooldowns } from './SpellSystem';
+import { resolveSpell, getRangeTiles } from './SpellSystem';
 import { RadialWheel, WheelNode } from '../ui/RadialWheel';
 
 const MAP_W     = 32;
@@ -243,8 +243,9 @@ export class Game {
           label: a.name,
           icon: this.spellIcon(a),
           color: ELEMENT_COLOR[a.element] ?? 0x888888,
-          disabled: a.cooldownCurrent > 0,
-          badge: a.cooldownCurrent > 0 ? `cd:${a.cooldownCurrent}` : undefined,
+          disabled: a.charges <= 0,
+          badge: `${a.charges}/${a.chargesMax}`,
+          tooltip: `DMG: ${a.damage}  RNG: ${a.range}  CHARGES: ${a.charges}/${a.chargesMax}${a.effects.length ? '\n' + a.effects.join(', ') : ''}`,
           action: () => this.enterTargeting(a),
         }))
       : [];
@@ -383,6 +384,14 @@ export class Game {
     if (this.phase === 'game_over') return;
     if (this.phase !== 'player') return;
 
+    // Stunned player loses their turn immediately
+    const playerStatus = this.world.getComponent<StatusEffect>(this.playerId, 'status');
+    if (playerStatus?.effects.has('stunned')) {
+      this.addMessage('You are stunned and lose your turn!');
+      this.endPlayerTurn();
+      return;
+    }
+
     const [col, row] = this.screenToTile(screenX, screenY);
     if (col < 0 || col >= MAP_W || row < 0 || row >= MAP_H) return;
 
@@ -403,6 +412,7 @@ export class Game {
       }
       this.clearRangeHighlight();
       resolveSpell(this.world, this.playerId, this.selectedAbility!, col, row, this.mapData, this.addMessage.bind(this));
+      this.alertEnemies(playerPos.col, playerPos.row, 5);
       this.mode = 'free';
       this.selectedAbility = null;
       this.drawActors();
@@ -439,12 +449,10 @@ export class Game {
   private endPlayerTurn() {
     this.turnCount++;
     this.phase = 'enemy';
-    // Run environment interactions at end of each full round
+    // Run environment interactions (burning damage, poison, etc.) at turn start
     for (const id of this.world.query('status', 'position')) {
-      processInteractions(this.world, id, { trigger: 'turn_start' });
+      processInteractions(this.world, id, { trigger: 'turn_start', addMessage: this.addMessage.bind(this) });
     }
-    // Tick spell cooldowns
-    tickCooldowns(this.world);
     setTimeout(() => this.processEnemyTurns(), 140);
   }
 
@@ -460,28 +468,135 @@ export class Game {
     );
 
     for (const enemyId of enemies) {
-      const ePos = this.world.getComponent<Position>(enemyId, 'position')!;
-      const dx = Math.abs(playerPos.col - ePos.col);
-      const dy = Math.abs(playerPos.row - ePos.row);
+      if (!this.world.hasComponent(this.playerId, 'health')) break;
 
-      if (dx <= 1 && dy <= 1) {
-        // Adjacent — melee strike
-        this.enemyMelee(enemyId, this.playerId);
-        if (!this.world.hasComponent(this.playerId, 'health')) break;
-      } else {
-        // Move toward player
-        const path = this.findPath(ePos.col, ePos.row, playerPos.col, playerPos.row, enemyId);
-        if (path.length >= 2) {
-          const [nc, nr] = path[1];
-          if (nc !== playerPos.col || nr !== playerPos.row) {
-            this.moveEntity(enemyId, nc, nr);
-          }
-        }
+      const status = this.world.getComponent<StatusEffect>(enemyId, 'status');
+      // Stunned: skip entire turn
+      if (status?.effects.has('stunned')) continue;
+
+      const ai = this.world.getComponent<AI>(enemyId, 'ai');
+      const strategy = ai?.strategy ?? 'basic';
+
+      switch (strategy) {
+        case 'ranged': this.enemyTurn_ranged(enemyId, playerPos, ai!, status); break;
+        case 'brute':  this.enemyTurn_brute(enemyId, playerPos, ai!, status);  break;
+        case 'swarm':  this.enemyTurn_basic(enemyId, playerPos, status);       break;
+        default:       this.enemyTurn_basic(enemyId, playerPos, status);       break;
       }
     }
 
+    // Tick status durations for all entities at end of round
+    for (const id of this.world.query('status')) {
+      const s = this.world.getComponent<StatusEffect>(id, 'status')!;
+      tickStatuses(s);
+    }
+
+    this.drawActors();
     this.phase = this.world.hasComponent(this.playerId, 'health') ? 'player' : 'game_over';
     if (this.phase === 'game_over') this.addMessage('You have died. Refresh to play again.');
+  }
+
+  private enemyTurn_basic(
+    enemyId: number,
+    playerPos: Position,
+    status: StatusEffect | undefined,
+  ) {
+    const ePos = this.world.getComponent<Position>(enemyId, 'position')!;
+    const dx = Math.abs(playerPos.col - ePos.col);
+    const dy = Math.abs(playerPos.row - ePos.row);
+    const slowed = status?.effects.has('slowed') ?? false;
+
+    if (dx <= 1 && dy <= 1) {
+      this.enemyMelee(enemyId, this.playerId);
+    } else if (!slowed) {
+      const path = this.findPath(ePos.col, ePos.row, playerPos.col, playerPos.row, enemyId);
+      if (path.length >= 2) {
+        const [nc, nr] = path[1];
+        if (nc !== playerPos.col || nr !== playerPos.row) this.moveEntity(enemyId, nc, nr);
+      }
+    }
+  }
+
+  private enemyTurn_ranged(
+    enemyId: number,
+    playerPos: Position,
+    ai: AI,
+    status: StatusEffect | undefined,
+  ) {
+    const ePos = this.world.getComponent<Position>(enemyId, 'position')!;
+    const distChebyshev = Math.max(Math.abs(playerPos.col - ePos.col), Math.abs(playerPos.row - ePos.row));
+    const distEucl = Math.hypot(playerPos.col - ePos.col, playerPos.row - ePos.row);
+    const slowed = status?.effects.has('slowed') ?? false;
+
+    // Too close and not alerted: back away
+    if (distChebyshev <= 2 && !ai.alerted && !slowed) {
+      const fc = ePos.col + Math.sign(ePos.col - playerPos.col);
+      const fr = ePos.row + Math.sign(ePos.row - playerPos.row);
+      if (this.mapData.walkable[fr]?.[fc] && this.getActorAt(fc, fr) === null) {
+        this.moveEntity(enemyId, fc, fr);
+        return;
+      }
+    }
+
+    // In range — try ranged attack
+    if (distEucl <= 5) {
+      const hit = this.enemyRangedAttack(enemyId, this.playerId, 5);
+      if (hit) return;
+    }
+
+    // Out of range or shot blocked — approach (unless slowed)
+    if (!slowed) {
+      const path = this.findPath(ePos.col, ePos.row, playerPos.col, playerPos.row, enemyId);
+      if (path.length >= 2) {
+        const [nc, nr] = path[1];
+        if (nc !== playerPos.col || nr !== playerPos.row) this.moveEntity(enemyId, nc, nr);
+      }
+    }
+  }
+
+  private enemyTurn_brute(
+    enemyId: number,
+    playerPos: Position,
+    ai: AI,
+    status: StatusEffect | undefined,
+  ) {
+    ai.moveCounter = (ai.moveCounter ?? 0) + 1;
+    // Brute acts only every other turn (sluggish)
+    if (ai.moveCounter % 2 !== 0) return;
+
+    const ePos = this.world.getComponent<Position>(enemyId, 'position')!;
+    const dx = Math.abs(playerPos.col - ePos.col);
+    const dy = Math.abs(playerPos.row - ePos.row);
+    const slowed = status?.effects.has('slowed') ?? false;
+
+    if (dx <= 1 && dy <= 1) {
+      this.enemyMelee(enemyId, this.playerId);
+    } else if (!slowed) {
+      const path = this.findPath(ePos.col, ePos.row, playerPos.col, playerPos.row, enemyId);
+      if (path.length >= 2) {
+        const [nc, nr] = path[1];
+        if (nc !== playerPos.col || nr !== playerPos.row) this.moveEntity(enemyId, nc, nr);
+      }
+    }
+  }
+
+  // ─── ALERT SYSTEM ─────────────────────────────────────────────────────────
+
+  /** Wake enemies within Chebyshev distance `radius` — they will rush the player. */
+  private alertEnemies(sourceCol: number, sourceRow: number, radius: number) {
+    let anyNewAlert = false;
+    for (const id of this.world.query('position', 'faction', 'ai')) {
+      if (this.world.getComponent<Faction>(id, 'faction')?.team !== 'enemy') continue;
+      const ai = this.world.getComponent<AI>(id, 'ai')!;
+      if (ai.alerted) continue;
+      const pos = this.world.getComponent<Position>(id, 'position')!;
+      const dist = Math.max(Math.abs(pos.col - sourceCol), Math.abs(pos.row - sourceRow));
+      if (dist <= radius) {
+        ai.alerted = true;
+        anyNewAlert = true;
+      }
+    }
+    if (anyNewAlert) this.addMessage('The enemies are alerted!');
   }
 
   // ─── COMBAT ───────────────────────────────────────────────────────────────
@@ -498,11 +613,50 @@ export class Game {
     defHealth.current -= dmg;
     this.addMessage(`Enemy hits you for ${dmg}!`);
 
+    // Melee contact alerts nearby enemies
+    const aPos = this.world.getComponent<Position>(attackerId, 'position');
+    if (aPos) this.alertEnemies(aPos.col, aPos.row, 4);
+
     if (defHealth.current <= 0) {
       this.addMessage('YOU DIED. Refresh to restart.');
       this.phase = 'game_over';
       this.world.removeComponent(this.playerId, 'health');
     }
+  }
+
+  /** Ranged line-of-sight attack from enemy to target. */
+  private enemyRangedAttack(attackerId: number, targetId: number, damage: number): boolean {
+    const aPos = this.world.getComponent<Position>(attackerId, 'position')!;
+    const tPos = this.world.getComponent<Position>(targetId, 'position');
+    const tHealth = this.world.getComponent<Health>(targetId, 'health');
+    if (!tPos || !tHealth) return false;
+
+    // Simple line-of-sight: check no walls block the direct line
+    const dx = Math.sign(tPos.col - aPos.col);
+    const dy = Math.sign(tPos.row - aPos.row);
+    // Only allow cardinal + diagonal directions for simplicity
+    if (dx !== 0 && dy !== 0 && Math.abs(tPos.col - aPos.col) !== Math.abs(tPos.row - aPos.row)) {
+      // Non-diagonal non-cardinal — use proximity check only
+    }
+
+    let c = aPos.col + dx, r = aPos.row + dy;
+    while (c !== tPos.col || r !== tPos.row) {
+      if (!this.mapData.walkable[r]?.[c]) return false; // wall blocks shot
+      c += dx; r += dy;
+    }
+
+    const def = this.world.getComponent<Combat>(targetId, 'combat')?.defense ?? 0;
+    const dmg = Math.max(1, damage - def);
+    tHealth.current -= dmg;
+    this.addMessage(`Archer shoots you for ${dmg}!`);
+    this.alertEnemies(aPos.col, aPos.row, 4);
+
+    if (tHealth.current <= 0) {
+      this.addMessage('YOU DIED. Refresh to restart.');
+      this.phase = 'game_over';
+      this.world.removeComponent(this.playerId, 'health');
+    }
+    return true;
   }
 
   // ─── MOVEMENT & RENDERING ─────────────────────────────────────────────────

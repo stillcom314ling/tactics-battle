@@ -99,7 +99,7 @@ export class TooltipOverlay {
     const name    = label?.name ?? '???';
     const hp      = health ? Math.max(0, Math.ceil(health.current)) : 0;
     const maxHp   = health?.max ?? 1;
-    const effects = status ? [...status.effects] : [];
+    const effects = status ? [...status.effects.keys()] : [];
     const ratio   = Math.max(0, Math.min(1, hp / maxHp));
 
     this.nameText.text   = name;
