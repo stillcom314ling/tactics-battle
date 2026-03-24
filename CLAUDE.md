@@ -18,47 +18,79 @@ src/
     ECS.ts                    # Entity-Component System (World, components)
     TurnManager.ts            # Turn-based flow using rot.js scheduler
     InteractionSystem.ts      # Emergent mechanic rules (fire+oil, wet+lightning, etc)
+    index.ts                  # Re-exports
   rendering/
     ParallaxAsciiRenderer.ts  # Core visual system: multi-layer ASCII with depth parallax
     CameraController.ts       # Mouse/touch pan with inertia
+    index.ts                  # Re-exports
   game/
-    Game.ts                   # Top-level orchestrator, game loop
+    Game.ts                   # Top-level orchestrator, game loop, input handling
     MapGenerator.ts           # rot.js dungeon generation → ECS entities + render layers
-    SpellSystem.ts            # Spell resolution, range geometry, cooldowns
+    SpellSystem.ts            # Spell definitions, resolution, range geometry, cooldowns
     RenderSystem.ts           # Syncs ECS state to parallax renderer each frame
   ui/
-    RadialWheel.ts            # Drag-to-select action wheel (spells, wait)
+    ActionMenu.ts             # Tap-to-open scrollable panel: Actives + Passives sections
+    DPad.ts                   # Virtual 8-directional movement pad + Wait center button
+    RadialWheel.ts            # (legacy) Drag-to-select action wheel — superseded by ActionMenu
     TooltipOverlay.ts         # Tap-to-inspect panel: name, HP bar, status effects
 ```
 
 ## Current State (what is already built)
 
 ### Core loop — fully playable
-- **Movement** — tap any floor tile, A* pathfinding moves player one step per turn
+- **Movement** — tap any floor tile (A* pathfinding) OR use the D-Pad for step-by-step 8-directional movement
 - **Turn flow** — player acts → enemies move/attack → environment ticks → repeat
 - **Enemy AI** — enemies pathfind toward player; melee strike when adjacent
 - **Death** — player HP reaches 0 → game_over phase, refresh to restart
 
-### Spell system
-Three starter spells on a cooldown system:
-| Spell | Element | Pattern | Damage | Effects |
-|---|---|---|---|---|
-| Flame Bolt | fire | single | 8 | burning |
-| Arc Lightning | lightning | line | 6 | shocked |
-| Frost Shard | ice | single | 5 | wet, slowed |
+### Controls
 
-Patterns: `single`, `line`, `aoe`, `self` — adding new spells is one object literal.
-Cooldowns tick each full turn. `InteractionSystem.ts` handles synergy rules (wet+lightning = bonus damage, etc.).
+#### Touch / Mouse
+| Action | Gesture |
+|---|---|
+| Move to tile | Tap any walkable floor tile |
+| Move one step | D-Pad arrow buttons (bottom-left corner) |
+| Wait a turn | D-Pad center `…` button |
+| Open spell menu | Tap the `⚡ ACTIONS` FAB (bottom-right) |
+| Cast spell | Select spell in menu → tap target tile |
+| Cast (aoe/line) | Select spell → tap target → tap same tile again to confirm |
+| Cancel targeting | Tap own tile (`@`) while in targeting mode |
+| Inspect entity | Tap any actor; tooltip shows name, HP bar, status effects |
+| Pan camera | Drag (with inertia); parallax layers shift at different speeds |
+
+#### Keyboard (desktop)
+| Key | Action |
+|---|---|
+| Arrow keys / WASD / numpad | Move one step |
+| `.` or `5` | Wait a turn |
+
+### Game modes (internal)
+- `free` — normal play; tap tiles to move or inspect
+- `targeting` — spell selected; range tiles highlighted; tap to aim, tap again if aoe/line to confirm
+
+### Spell system
+Four starter spells on a charge/cooldown system:
+| Spell | Element | Pattern | Range | Damage | Effects |
+|---|---|---|---|---|---|
+| Flame Bolt | fire | single | 5 | 10 | burning |
+| Arc Lightning | lightning | line | 5 | 7 | shocked |
+| Frost Shard | ice | single | 4 | 6 | wet, slowed |
+| Poison Cloud | poison | aoe (r=2) | 4 | 4 | poisoned |
+
+Patterns: `single`, `line`, `aoe`, `self` — adding new spells is one object literal in `SpellSystem.ts`.
+Charges refill each full turn. `InteractionSystem.ts` handles synergy rules (wet+lightning = bonus damage, etc.).
 
 ### UI
-- **Radial wheel** — hold ⚡ FAB and drag to select action; opens at screen center
-- **Targeting mode** — spell selected → range tiles highlight in element colour, enemy glyphs tint to spell colour; tap to cast, tap own tile to cancel
+- **Action Menu** (`ActionMenu.ts`) — tap `⚡ ACTIONS` FAB to open a scrollable panel; ACTIVES section lists available spells with element icon, name, tooltip, and charges badge; PASSIVES section is a placeholder checklist; drag to scroll; tap outside to close
+- **D-Pad** (`DPad.ts`) — 3×3 grid of 8 directional arrows + center Wait button; positioned bottom-left; fires `onDirection(dx,dy)` or `onWait()`
+- **Targeting mode overlay** — spell selected → in-range floor tiles highlight in element colour; enemy glyphs tint to spell colour; mode hint shows spell name and instructions
+- **Two-tap confirm** — aoe and line spells show blast preview (`*`) on first tap; second tap on same tile casts; tap own tile (`@`) cancels
 - **Tooltip overlay** — tap any entity to inspect: name, animated HP bar (green→yellow→red), active status effects in their element colour
 - **HUD** — HP, turn counter, enemy count, phase indicator, log of last 3 messages
 - **Portrait-aware** — font sizes and FAB scaled for mobile; mode hint wraps to screen width
 
 ### ECS Components in use
-`position`, `renderable`, `health`, `faction`, `status`, `movement`, `combat`, `abilities`, `terrain`, `label`
+`position`, `renderable`, `health`, `faction`, `status`, `movement`, `combat`, `abilities`, `terrain`, `label`, `ai`
 
 ---
 
@@ -105,10 +137,10 @@ These are the most impactful directions. Discuss with a new chat to choose focus
 **What:** Killing enemies drops "essence" of their element. Collect enough → unlock new spells or upgrade existing ones (e.g. Flame Bolt → Inferno: AoE pattern, higher damage).
 **Upgrade ideas:**
 - Range +1, damage +3, add second effect, reduce cooldown by 1
-- New spells: Poison Cloud (AoE, applies poisoned), Chain Lightning (bounces 2 times), Ice Nova (AoE slowed + wet)
+- New spells: Chain Lightning (bounces 2 times), Ice Nova (AoE slowed + wet), Void Bolt (arcane, silences)
 
 **Why:** The spell system is already clean and extensible — crafting gives it long-term depth without new systems.
-**How:** Add `essence` resource to player. Show essence count in HUD. Add "Upgrade" submenu to radial wheel. Mutations are just property changes on `Ability` objects.
+**How:** Add `essence` resource to player. Show essence count in HUD. Add "Upgrade" submenu to ActionMenu ACTIVES section. Mutations are just property changes on `Ability` objects.
 **Complexity:** Medium.
 
 ### 6. Spell/hit visual feedback
@@ -172,8 +204,14 @@ This project is designed for iterative development with Claude Code. See the **W
 3. **Items on the ground** — potions/scrolls, auto-collect on step, instant effect
 4. **Win condition + floor descent** — kill all enemies, staircase spawns, scale next floor
 5. **Spell VFX** — tile flash + enemy hit flash via a lightweight `VFXQueue` in the game loop
-6. **Spell upgrades** — essence drops from kills, spend to mutate `Ability` objects
+6. **Spell upgrades** — essence drops from kills, spend to mutate `Ability` objects in ActionMenu
 7. **High score in localStorage** — floor/kills/turns on death screen, trivial to add
+
+### Key implementation notes
+- **Adding a spell:** one object literal returned from a `makeXxx(): Ability` factory in `SpellSystem.ts`; wire it into `setupPlayer` in `Game.ts`
+- **Two-tap targeting:** `aoe` and `line` patterns require `pendingTargetCol/Row` to be set on first tap; `clearSpellPreview` clears ONLY visual tiles — `pendingTargetCol/Row` is reset only in `clearRangeHighlight` (cast or cancel)
+- **ActionMenu ACTIVES:** rebuilt each time `actionMenu.open()` is called; pass updated `ActiveItem[]` from player's `abilities` component
+- **D-Pad position:** `dpad.resize(x, y)` called in the game loop resize handler; positioned bottom-left corner
 
 ## Design Goals
 
