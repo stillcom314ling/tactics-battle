@@ -13,7 +13,7 @@
  *   game_over — display only
  */
 
-import { Application, Text, TextStyle, Graphics, Container } from 'pixi.js';
+import { Application, Text, TextStyle, Graphics, Container, ColorMatrixFilter } from 'pixi.js';
 import * as ROT from 'rot-js';
 import { ParallaxAsciiRenderer } from '../rendering/ParallaxAsciiRenderer';
 import { CameraController } from '../rendering/CameraController';
@@ -40,6 +40,16 @@ const ELEMENT_COLOR: Record<string, number> = {
 
 type GameMode  = 'free' | 'targeting';
 type GamePhase = 'player' | 'enemy' | 'game_over';
+
+/** Linearly interpolate between two 0xRRGGBB hex colors. */
+function lerpColor(a: number, b: number, t: number): number {
+  const ar = (a >> 16) & 0xff, ag = (a >> 8) & 0xff, ab = a & 0xff;
+  const br = (b >> 16) & 0xff, bg = (b >> 8) & 0xff, bb = b & 0xff;
+  const r = Math.round(ar + (br - ar) * t);
+  const g = Math.round(ag + (bg - ag) * t);
+  const bv = Math.round(ab + (bb - ab) * t);
+  return (r << 16) | (g << 8) | bv;
+}
 
 export class Game {
   private app!: Application;
@@ -69,6 +79,9 @@ export class Game {
 
   private wheel!: RadialWheel;
   private tooltip!: TooltipOverlay;
+  private entityOverlayGfx!: Graphics; // per-entity HP bars drawn each frame
+  private hitFilter!: ColorMatrixFilter;
+  private hitFlashFrames: number = 0;
 
   constructor(private container: HTMLElement) {}
 
@@ -124,6 +137,7 @@ export class Game {
     this.setupWheel();
     this.setupTooltip();
     this.setupInput();
+    this.setupEntityOverlay();
 
     this.addMessage('Hold ⚡ and drag to select an action.');
     this.addMessage('Tap a floor tile to move.');
@@ -233,6 +247,23 @@ export class Game {
   private setupTooltip() {
     this.tooltip = new TooltipOverlay();
     this.uiLayer.addChild(this.tooltip.container);
+  }
+
+  private setupEntityOverlay() {
+    // Single Graphics object redrawn every frame for per-entity HP bars
+    this.entityOverlayGfx = new Graphics();
+    this.entityOverlayGfx.eventMode = 'none'; // never intercept input
+    this.uiLayer.addChild(this.entityOverlayGfx);
+
+    // Red screen-flash filter applied to the parallax root on player hit
+    this.hitFilter = new ColorMatrixFilter();
+    // Boost red, suppress green/blue
+    this.hitFilter.matrix = [
+      2,   0,   0, 0, 0,
+      0, 0.3,   0, 0, 0,
+      0,   0, 0.3, 0, 0,
+      0,   0,   0, 1, 0,
+    ];
   }
 
   private buildWheelNodes(): WheelNode[] {
@@ -612,6 +643,7 @@ export class Game {
     const dmg = Math.max(1, atk.attackPower + Math.floor(Math.random() * 4) - def);
     defHealth.current -= dmg;
     this.addMessage(`Enemy hits you for ${dmg}!`);
+    this.hitFlashFrames = 4; // red screen flash
 
     // Melee contact alerts nearby enemies
     const aPos = this.world.getComponent<Position>(attackerId, 'position');
@@ -649,6 +681,7 @@ export class Game {
     const dmg = Math.max(1, damage - def);
     tHealth.current -= dmg;
     this.addMessage(`Archer shoots you for ${dmg}!`);
+    this.hitFlashFrames = 4; // red screen flash
     this.alertEnemies(aPos.col, aPos.row, 4);
 
     if (tHealth.current <= 0) {
@@ -686,19 +719,50 @@ export class Game {
   }
 
   private drawActors() {
+    const overlay = this.entityOverlayGfx;
+    overlay.clear();
+    const { x: ox, y: oy, cellSize } = this.renderer.getLayerScreenOffset('gameplay');
+
     for (const id of this.world.query('position', 'renderable', 'faction')) {
-      const pos  = this.world.getComponent<Position>(id, 'position')!;
-      const rend = this.world.getComponent<Renderable>(id, 'renderable')!;
-      // Colour tint for status effects
+      const pos    = this.world.getComponent<Position>(id, 'position')!;
+      const rend   = this.world.getComponent<Renderable>(id, 'renderable')!;
       const status = this.world.getComponent<StatusEffect>(id, 'status');
+      const hp     = this.world.getComponent<Health>(id, 'health');
+
+      // ── Glyph color: status > HP-tint > base ──────────────────────
       let fg = rend.fg;
-      if (status) {
-        if (status.effects.has('burning'))  fg = 0xff5500;
-        if (status.effects.has('shocked'))  fg = 0xffff00;
-        if (status.effects.has('slowed'))   fg = 0x88ccff;
-        if (status.effects.has('poisoned')) fg = 0x66ff44;
+      const hasStatus = status && status.effects.size > 0;
+      if (hasStatus) {
+        if (status!.effects.has('burning'))  fg = 0xff5500;
+        if (status!.effects.has('shocked'))  fg = 0xffff00;
+        if (status!.effects.has('slowed'))   fg = 0x88ccff;
+        if (status!.effects.has('poisoned')) fg = 0x66ff44;
+      } else if (hp && hp.max > 0) {
+        const ratio = Math.max(0, hp.current / hp.max);
+        if (ratio < 0.6) {
+          // Lerp base color toward dark red as HP drops
+          const t = (1 - ratio / 0.6) * 0.55;
+          fg = lerpColor(rend.fg, 0x993333, t);
+        }
       }
       this.renderer.setCell('gameplay', pos.col, pos.row, { char: rend.char, fg, alpha: rend.alpha ?? 1.0 });
+
+      // ── Mini HP bar (drawn in screen space, below glyph) ──────────
+      if (hp && hp.max > 0 && id !== this.playerId) {
+        const ratio = Math.max(0, Math.min(1, hp.current / hp.max));
+        if (ratio < 1.0) {
+          const barW    = cellSize - 2;
+          const barH    = 2;
+          const barX    = ox + pos.col * cellSize + 1;
+          const barY    = oy + pos.row * cellSize + cellSize - 3;
+          const barColor = ratio > 0.6 ? 0x44dd44 : ratio > 0.3 ? 0xffcc00 : 0xff3333;
+
+          // Dark background
+          overlay.rect(barX, barY - 1, barW, barH + 2).fill({ color: 0x000000, alpha: 0.7 });
+          // Colored fill
+          overlay.rect(barX, barY, Math.round(barW * ratio), barH).fill({ color: barColor });
+        }
+      }
     }
   }
 
@@ -742,5 +806,13 @@ export class Game {
     this.renderer.cameraY = this.camera.state.y;
     this.renderer.updateCamera(this.app.screen.width, this.app.screen.height);
     this.updateHUD();
+
+    // Hit-flash: briefly tint the whole scene red when player takes damage
+    if (this.hitFlashFrames > 0) {
+      this.renderer.root.filters = [this.hitFilter];
+      this.hitFlashFrames--;
+    } else if (this.renderer.root.filters?.length) {
+      this.renderer.root.filters = [];
+    }
   }
 }

@@ -202,4 +202,19 @@ export class ParallaxAsciiRenderer {
   getLayer(layerId: string): LayerState | undefined {
     return this.layers.get(layerId);
   }
+
+  /**
+   * Returns the current screen-space origin and cell size for a layer.
+   * Useful for drawing UI overlays aligned to tile positions.
+   * Call after updateCamera() each frame.
+   */
+  getLayerScreenOffset(layerId: string): { x: number; y: number; cellSize: number } {
+    const layer = this.layers.get(layerId);
+    if (!layer) return { x: 0, y: 0, cellSize: 16 };
+    return {
+      x: layer.container.x,
+      y: layer.container.y,
+      cellSize: layer.config.cellSize,
+    };
+  }
 }
