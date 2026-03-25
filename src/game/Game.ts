@@ -464,6 +464,16 @@ export class Game {
 
   private loop() {
     this.camera.update();
+
+    // Clamp camera so the map never scrolls entirely off-screen.
+    // Allows panning from one map edge to the other, no further.
+    const maxCamX = (MAP_W / 2) * CELL_SIZE;
+    const maxCamY = (MAP_H / 2) * CELL_SIZE;
+    if (this.camera.state.x >  maxCamX) { this.camera.state.x =  maxCamX; this.camera.state.velocityX = 0; }
+    if (this.camera.state.x < -maxCamX) { this.camera.state.x = -maxCamX; this.camera.state.velocityX = 0; }
+    if (this.camera.state.y >  maxCamY) { this.camera.state.y =  maxCamY; this.camera.state.velocityY = 0; }
+    if (this.camera.state.y < -maxCamY) { this.camera.state.y = -maxCamY; this.camera.state.velocityY = 0; }
+
     this.renderer.cameraX = this.camera.state.x;
     this.renderer.cameraY = this.camera.state.y;
     this.renderer.updateCamera(this.app.screen.width, this.app.screen.height);

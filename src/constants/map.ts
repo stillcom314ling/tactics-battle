@@ -26,9 +26,12 @@ export const DUNGEON_OPTIONS = {
 
 export const FLOOR_CHARS  = ['.', '·', ',', '`'] as const;
 export const WALL_CHARS   = ['#', '█', '▓', '▒'] as const;
-export const BG_FAR_CHARS = ['·', '.', '∙', ' ', ' ', ' ', ' '] as const;
-export const BG_MID_CHARS = ['░', '·', '∘', '°', ' ', ' '] as const;
-export const FG_CHARS     = ['✦', '·', '∗', ' ', ' ', ' ', ' ', ' '] as const;
+/** bg_far star/dot chars — used for the sparse starfield dots */
+export const BG_FAR_CHARS = ['·', '∙', '✦', '∗', '.'] as const;
+/** bg_mid fill chars — used for sparse scatter between pillars/beams */
+export const BG_MID_CHARS = ['░', '·', '∘', '°', '▪'] as const;
+/** foreground sparkle chars — floating near-plane particles */
+export const FG_CHARS     = ['✦', '✧', '∗', '◆', '◇', '·', '∙'] as const;
 
 // ── Enemy spawn tuning ────────────────────────────────────────────────────────
 

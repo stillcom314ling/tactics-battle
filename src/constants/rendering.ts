@@ -41,12 +41,12 @@ export const FG_LAYER_SCALE = 1.2;
 
 // ── Layer alpha / tint (atmospheric depth simulation) ────────────────────────
 
-export const BG_FAR_ALPHA = 0.4;
-export const BG_FAR_TINT  = 0x8888aa;
-export const BG_MID_ALPHA = 0.5;
-export const BG_MID_TINT  = 0x9999bb;
+export const BG_FAR_ALPHA = 0.55;
+export const BG_FAR_TINT  = 0x6688aa;
+export const BG_MID_ALPHA = 0.65;
+export const BG_MID_TINT  = 0x8877aa;
 export const GAMEPLAY_ALPHA    = 1.0;
-export const FOREGROUND_ALPHA  = 0.3;
+export const FOREGROUND_ALPHA  = 0.45;
 
 // ── Background color ──────────────────────────────────────────────────────────
 
@@ -60,9 +60,12 @@ export const APP_BG_COLOR = 0x0a0a0c;
 export const WALL_COLORS   = [0x1e2a38, 0x18222e, 0x1a2433, 0x1c2636] as const;
 /** Floor sub-cell colours: near-black, barely visible texture. */
 export const FLOOR_COLORS  = [0x0d1520, 0x0f1825, 0x111b29] as const;
-export const BG_FAR_COLORS = [0x1a1a2e, 0x16213e, 0x0f1626] as const;
-export const BG_MID_COLORS = [0x222244, 0x1a1a3a, 0x2a2a44] as const;
-export const FG_COLORS     = [0x2a3a4a, 0x2e3e50, 0x253545] as const;
+/** bg_far: cold deep-space blue — circuit grid lines and distant stars */
+export const BG_FAR_COLORS = [0x1a2840, 0x152030, 0x1e3048] as const;
+/** bg_mid: muted violet-slate — ruined stone pillars and beams */
+export const BG_MID_COLORS = [0x2a1e3a, 0x221830, 0x302244] as const;
+/** foreground: warm ice-white — sparkle motes catch the neon light */
+export const FG_COLORS     = [0x88aacc, 0x99bbdd, 0x7799bb] as const;
 
 // ── Element colours — vivid neon (targeting highlights and action menu) ───────
 

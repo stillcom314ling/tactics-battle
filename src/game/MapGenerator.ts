@@ -111,31 +111,57 @@ export function generateMap(width: number = MAP_W, height: number = MAP_H): Gene
     }
   }
 
-  // Background layers (larger than gameplay for parallax coverage)
+  // ── Background layers (larger than gameplay for parallax coverage) ─────────
   const bgW = Math.ceil(width  * BG_LAYER_SCALE);
   const bgH = Math.ceil(height * BG_LAYER_SCALE);
 
-  const bgFar: (AsciiCell | null)[][] = Array.from({ length: bgH }, () =>
-    Array.from({ length: bgW }, () => {
-      const ch = pick(BG_FAR_CHARS);
-      return ch === ' ' ? null : { char: ch, fg: pick(BG_FAR_COLORS), alpha: 0.3 + Math.random() * 0.2 };
+  // bg_far — distant void with a faint circuit-grid overlay.
+  // Horizontal scan-lines every ~8 rows + vertical traces every ~10 cols give
+  // a deep-space/motherboard feel.  Sparse glowing dots fill the voids.
+  const bgFar: (AsciiCell | null)[][] = Array.from({ length: bgH }, (_, row) =>
+    Array.from({ length: bgW }, (_, col) => {
+      const onHLine = (row % 8 === 0) && Math.random() < 0.38;
+      const onVLine = (col % 10 === 0) && Math.random() < 0.28;
+      if (onHLine && onVLine) return { char: '+', fg: pick(BG_FAR_COLORS), alpha: 0.07 };
+      if (onHLine)            return { char: '─', fg: pick(BG_FAR_COLORS), alpha: 0.05 };
+      if (onVLine)            return { char: '│', fg: pick(BG_FAR_COLORS), alpha: 0.04 };
+      if (Math.random() < 0.045) {
+        return { char: pick(BG_FAR_CHARS), fg: pick(BG_FAR_COLORS), alpha: 0.14 + Math.random() * 0.18 };
+      }
+      return null;
     })
   );
 
-  const bgMid: (AsciiCell | null)[][] = Array.from({ length: bgH }, () =>
-    Array.from({ length: bgW }, () => {
-      const ch = pick(BG_MID_CHARS);
-      return ch === ' ' ? null : { char: ch, fg: pick(BG_MID_COLORS), alpha: 0.2 + Math.random() * 0.3 };
+  // bg_mid — ruined stone architecture.
+  // Vertical pillar traces at irregular intervals + sparse horizontal beams
+  // suggest crumbling dungeon walls receding into the parallax distance.
+  const pillarCols = new Set<number>();
+  for (let c = 2 + randomInt(0, 3); c < bgW; c += 5 + randomInt(0, 4)) pillarCols.add(c);
+  const beamRows = new Set<number>();
+  for (let r = 3 + randomInt(0, 2); r < bgH; r += 4 + randomInt(0, 3)) beamRows.add(r);
+
+  const bgMid: (AsciiCell | null)[][] = Array.from({ length: bgH }, (_, row) =>
+    Array.from({ length: bgW }, (_, col) => {
+      const isPillar = pillarCols.has(col) && Math.random() < 0.78;
+      const isBeam   = beamRows.has(row)   && Math.random() < 0.48;
+      if (isPillar && isBeam) return { char: pick(['╫', '┼', '╪']),            fg: pick(BG_MID_COLORS), alpha: 0.20 };
+      if (isPillar)           return { char: pick(['│', '║', '▒', '│', '║']), fg: pick(BG_MID_COLORS), alpha: 0.15 };
+      if (isBeam)             return { char: pick(['─', '═', '─', '═', '▬']), fg: pick(BG_MID_COLORS), alpha: 0.13 };
+      if (Math.random() < 0.025) return { char: pick(BG_MID_CHARS),            fg: pick(BG_MID_COLORS), alpha: 0.09 };
+      return null;
     })
   );
 
-  // Foreground layer
+  // foreground — floating dust motes and sparkles.
+  // Very sparse, varied alpha to suggest depth within the near plane.
   const fgW = Math.ceil(width  * FG_LAYER_SCALE);
   const fgH = Math.ceil(height * FG_LAYER_SCALE);
   const foreground: (AsciiCell | null)[][] = Array.from({ length: fgH }, () =>
     Array.from({ length: fgW }, () => {
-      const ch = pick(FG_CHARS);
-      return ch === ' ' ? null : { char: ch, fg: pick(FG_COLORS), alpha: 0.15 + Math.random() * 0.15 };
+      if (Math.random() < 0.022) {
+        return { char: pick(FG_CHARS), fg: pick(FG_COLORS), alpha: 0.12 + Math.random() * 0.22 };
+      }
+      return null;
     })
   );
 

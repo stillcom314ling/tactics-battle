@@ -4,14 +4,6 @@
  * Each game tile is rendered as a 3×3 block of ASCII sub-cells (8px each,
  * total 24px per tile).
  *
- * CENTRE CHAR SIZING
- * ──────────────────
- * The centre sub-cell [1][1] of actor patterns uses fontSize=16 (2× the
- * sub-cell size).  This makes the primary glyph large and readable while
- * the 8 surrounding "detail" cells remain small.  The 16px char is placed
- * at pixel (8, 8) within the 24px tile, extending to roughly (16, 24) — it
- * dominates the tile without overflowing it.
- *
  * COLOUR CONVENTION — dark walls, neon actors
  * ────────────────────────────────────────────
  * Terrain  → very dark, near-black; recedes into background
@@ -40,10 +32,8 @@ export type CellPattern = [
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function c(char: string, fg: number, alpha = 1.0, fontSize?: number): SubCell {
-  return fontSize !== undefined
-    ? { char, fg, alpha, fontSize }
-    : { char, fg, alpha };
+function c(char: string, fg: number, alpha = 1.0): SubCell {
+  return { char, fg, alpha };
 }
 
 /** Dim a neon colour to ~35% brightness for surround detail chars. */
@@ -129,120 +119,78 @@ export function makeFloorPattern(fg: number, styleIndex: number): CellPattern {
 
 // ─── ACTOR PATTERNS ──────────────────────────────────────────────────────────
 //
-// Centre [1][1]: primary glyph at fontSize=16 — large, vivid, unmistakable.
-// Surrounding 8 sub-cells: small 8px detail chars in a dimmer shade of the
-// actor's neon colour, drawn at low alpha so they frame without cluttering.
+// Centre [1][1]: primary glyph at full 8px sub-cell size.
+// Surrounding 8 sub-cells: dim neon detail chars that frame the centre char.
 //
-// Each silhouette evokes the archetype:
-//   @  player    — clean bracket frame, adventurer feel
-//   g  goblin    — jagged caret/tilde surround, feral
+//   @  player    — bracket frame
+//   g  goblin    — caret ears, tilde skirt
 //   a  archer    — arrow motif pointing right
-//   B  brute     — thick hash/block border, imposing
-//   m  mage      — star-corner aura, magical
-//   z  swarmer   — minimal dot frame, small and skittering
+//   B  brute     — heavy hash/box border
+//   m  mage      — star-corner aura
+//   z  swarmer   — minimal dot frame
 
-/**
- * Player — bracket frame.
- *
- *   ─  ─  ─
- *   │  @  │    (@ at 16px)
- *   ─  ─  ─
- */
+/** Player — bracket frame: ─│@│─ */
 export function makePlayerPattern(fg: number): CellPattern {
   const d = dim(fg, 0.40);
   return [
     [c('─', d, 0.50), c('─', d, 0.35), c('─', d, 0.50)],
-    [c('│', d, 0.50), c('@', fg, 1.0, 16), c('│', d, 0.50)],
+    [c('│', d, 0.50), c('@', fg, 1.0),  c('│', d, 0.50)],
     [c('─', d, 0.40), c('─', d, 0.30), c('─', d, 0.40)],
   ];
 }
 
-/**
- * Goblin — caret ears, tilde skirt.
- *
- *   ^  ─  ^
- *   >  g  <    (g at 16px)
- *   ~  ~  ~
- */
+/** Goblin — ^─^ / >g< / ~~~ */
 export function makeGoblinPattern(fg: number): CellPattern {
   const d = dim(fg, 0.40);
   return [
     [c('^', d, 0.55), c('─', d, 0.30), c('^', d, 0.55)],
-    [c('>', d, 0.45), c('g', fg, 1.0, 16), c('<', d, 0.45)],
+    [c('>', d, 0.45), c('g', fg, 1.0),  c('<', d, 0.45)],
     [c('~', d, 0.45), c('~', d, 0.35), c('~', d, 0.45)],
   ];
 }
 
-/**
- * Archer — arrow pointing right.
- *
- *   ·  ─  ─
- *   ·  a  ►    (a at 16px, arrow head on right)
- *   ·  ─  ·
- */
+/** Archer — ──► / ─a► / ─── */
 export function makeArcherPattern(fg: number): CellPattern {
   const d = dim(fg, 0.40);
   return [
-    [_,             c('─', d, 0.35), c('─', d, 0.45)],
-    [c('─', d, 0.30), c('a', fg, 1.0, 16), c('►', d, 0.65)],
-    [_,             c('─', d, 0.30), _             ],
+    [_,               c('─', d, 0.35), c('─', d, 0.45)],
+    [c('─', d, 0.30), c('a', fg, 1.0),  c('►', d, 0.65)],
+    [_,               c('─', d, 0.30), _              ],
   ];
 }
 
-/**
- * Brute — heavy hash border.
- *
- *   #  ═  #
- *   ║  B  ║    (B at 16px)
- *   #  ═  #
- */
+/** Brute — #═# / ║B║ / #═# */
 export function makeBrutePattern(fg: number): CellPattern {
   const d = dim(fg, 0.45);
   return [
     [c('#', d, 0.65), c('═', d, 0.55), c('#', d, 0.65)],
-    [c('║', d, 0.55), c('B', fg, 1.0, 16), c('║', d, 0.55)],
+    [c('║', d, 0.55), c('B', fg, 1.0),  c('║', d, 0.55)],
     [c('#', d, 0.65), c('═', d, 0.55), c('#', d, 0.65)],
   ];
 }
 
-/**
- * Mage — star-corner aura.
- *
- *   *  ·  *
- *   ·  m  ·    (m at 16px)
- *   *  ·  *
- */
+/** Mage — *·* / ·m· / *·* */
 export function makeMagePattern(fg: number): CellPattern {
   const d = dim(fg, 0.45);
   return [
     [c('*', d, 0.70), c('·', d, 0.30), c('*', d, 0.70)],
-    [c('·', d, 0.30), c('m', fg, 1.0, 16), c('·', d, 0.30)],
+    [c('·', d, 0.30), c('m', fg, 1.0),  c('·', d, 0.30)],
     [c('*', d, 0.70), c('·', d, 0.30), c('*', d, 0.70)],
   ];
 }
 
-/**
- * Swarmer — minimal dot frame, barely there.
- *
- *   ·  ·  ·
- *   ·  z  ·    (z at 16px)
- *   ·  ·  ·
- */
+/** Swarmer — ··· / ·z· / ··· */
 export function makeSwarmerPattern(fg: number): CellPattern {
   const d = dim(fg, 0.35);
   return [
     [c('·', d, 0.40), c('·', d, 0.30), c('·', d, 0.40)],
-    [c('·', d, 0.35), c('z', fg, 1.0, 16), c('·', d, 0.35)],
+    [c('·', d, 0.35), c('z', fg, 1.0),  c('·', d, 0.35)],
     [c('·', d, 0.40), c('·', d, 0.30), c('·', d, 0.40)],
   ];
 }
 
 // ─── ACTOR PATTERN DISPATCHER ────────────────────────────────────────────────
 
-/**
- * Given an actor's ECS char glyph and base colour, return the 3×3 pattern.
- * Falls back to a centred single char for unknown glyphs.
- */
 export function makeActorPattern(char: string, fg: number): CellPattern {
   switch (char) {
     case '@': return makePlayerPattern(fg);
@@ -254,7 +202,7 @@ export function makeActorPattern(char: string, fg: number): CellPattern {
     default:
       return [
         [_, _, _],
-        [_, c(char, fg, 1.0, 16), _],
+        [_, c(char, fg, 1.0), _],
         [_, _, _],
       ];
   }
