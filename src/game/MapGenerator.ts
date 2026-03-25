@@ -1,243 +1,183 @@
 /**
  * MAP GENERATOR
  *
- * Uses rot.js to generate dungeon maps, then populates the ECS world
+ * Uses rot.js Digger to generate dungeon maps, then populates the ECS world
  * and the parallax renderer layers.
  *
  * Background layers get procedural atmospheric ASCII (dots, noise chars).
- * Gameplay layer gets the actual dungeon.
- * Foreground layer gets occasional floating particles/debris.
+ * Gameplay layer gets the actual dungeon walls and floors.
+ * Foreground layer gets occasional floating particles / debris.
  */
 
 import * as ROT from 'rot-js';
 import {
   World, Position, Renderable, Terrain, Health, Faction, StatusEffect,
-  Movement, Combat, Abilities, Label, AI
+  Movement, Combat, Abilities, Label, AI,
 } from '../core/ECS';
 import { AsciiCell } from '../rendering/ParallaxAsciiRenderer';
-import { makeFlameBolt, makeArcLightning, makeFrostShard, makePoisonCloud } from './SpellSystem';
+import { makeDefaultPlayerAbilities } from './SpellSystem';
+import {
+  MAP_W, MAP_H, DUNGEON_OPTIONS,
+  FLOOR_CHARS, WALL_CHARS, BG_FAR_CHARS, BG_MID_CHARS, FG_CHARS,
+  ENEMY_COUNT_MIN, ENEMY_COUNT_VARIANCE,
+} from '../constants/map';
+import {
+  WALL_COLORS, FLOOR_COLORS, BG_FAR_COLORS, BG_MID_COLORS, FG_COLORS,
+  BG_LAYER_SCALE, FG_LAYER_SCALE,
+} from '../constants/rendering';
+import {
+  PLAYER_HP_MAX, PLAYER_MOVE_RANGE, PLAYER_ATTACK_POWER, PLAYER_DEFENSE, PLAYER_ATTACK_RANGE,
+} from '../constants/combat';
+import { pick, weightedPick, shuffleInPlace, randomInt } from '../utils/random';
+import { ENEMY_TYPES, EnemyTypeConfig } from '../constants/enemies';
 
 export interface GeneratedMap {
   gameplay:   (AsciiCell | null)[][];
   bgFar:      (AsciiCell | null)[][];
   bgMid:      (AsciiCell | null)[][];
   foreground: (AsciiCell | null)[][];
-  width:  number;
-  height: number;
-  walkable: boolean[][];
-}
-
-const FLOOR_CHARS = ['.', '·', ',', '`'];
-const WALL_CHARS  = ['#', '█', '▓', '▒'];
-const BG_FAR_CHARS = ['·', '.', '∙', ' ', ' ', ' ', ' '];
-const BG_MID_CHARS = ['░', '·', '∘', '°', ' ', ' '];
-const FG_CHARS     = ['✦', '·', '∗', ' ', ' ', ' ', ' ', ' '];
-
-const WALL_COLORS  = [0x445566, 0x334455, 0x3a4a5a, 0x2d3d4d];
-const FLOOR_COLORS = [0x556677, 0x667788, 0x5a6a7a];
-const BG_FAR_COLORS = [0x1a1a2e, 0x16213e, 0x0f1626];
-const BG_MID_COLORS = [0x222244, 0x1a1a3a, 0x2a2a44];
-const FG_COLORS    = [0x8899aa, 0x99aabb, 0x778899];
-
-function pick<T>(arr: T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
-
-// ─── ENEMY TYPE CONFIG ───────────────────────────────────────────────────────
-
-interface EnemyTypeConfig {
-  char: string;
-  name: string;
-  color: number;
-  hpMin: number;
-  hpMax: number;
-  attack: number;
-  defense: number;
-  moveRange: number;
-  strategy: AI['strategy'];
-  weight: number;       // relative spawn probability
-  groupSize?: number;   // if > 1, always spawns this many together (swarmers)
-}
-
-const ENEMY_TYPES: EnemyTypeConfig[] = [
-  // Goblin — basic rushdown, low HP
-  { char: 'g', name: 'Goblin', color: 0xff5544, hpMin: 18, hpMax: 26,
-    attack: 6, defense: 1, moveRange: 2, strategy: 'basic', weight: 3 },
-  // Archer — stays at range, shoots; fragile
-  { char: 'a', name: 'Archer', color: 0xffdd44, hpMin: 8, hpMax: 12,
-    attack: 5, defense: 0, moveRange: 3, strategy: 'ranged', weight: 2 },
-  // Brute — massive HP, moves every other turn
-  { char: 'B', name: 'Brute',  color: 0xcc2211, hpMin: 60, hpMax: 75,
-    attack: 13, defense: 4, moveRange: 2, strategy: 'brute', weight: 1 },
-  // Swarmer — very weak, always spawns in clusters
-  { char: 'z', name: 'Swarmer', color: 0xaa9988, hpMin: 8, hpMax: 14,
-    attack: 3, defense: 0, moveRange: 3, strategy: 'swarm', weight: 3, groupSize: 3 },
-];
-
-// Build weighted lookup
-function pickEnemyType(): EnemyTypeConfig {
-  const total = ENEMY_TYPES.reduce((s, t) => s + t.weight, 0);
-  let r = Math.random() * total;
-  for (const t of ENEMY_TYPES) {
-    r -= t.weight;
-    if (r <= 0) return t;
-  }
-  return ENEMY_TYPES[0];
+  width:      number;
+  height:     number;
+  walkable:   boolean[][];
 }
 
 function spawnEnemy(world: World, pos: { col: number; row: number }, cfg: EnemyTypeConfig) {
-  const hp = cfg.hpMin + Math.floor(Math.random() * (cfg.hpMax - cfg.hpMin + 1));
+  const hp = randomInt(cfg.hpMin, cfg.hpMax);
   const id = world.createEntity();
-  world.addComponent(id, { type: 'position', col: pos.col, row: pos.row, layer: 'gameplay' } as Position);
+  world.addComponent(id, { type: 'position',  col: pos.col, row: pos.row, layer: 'gameplay' } as Position);
   world.addComponent(id, { type: 'renderable', char: cfg.char, fg: cfg.color } as Renderable);
-  world.addComponent(id, { type: 'health', current: hp, max: hp } as Health);
-  world.addComponent(id, { type: 'faction', team: 'enemy' } as Faction);
-  world.addComponent(id, { type: 'status', effects: new Map() } as StatusEffect);
-  world.addComponent(id, { type: 'movement', range: cfg.moveRange, canFly: false } as Movement);
-  world.addComponent(id, { type: 'combat', attackPower: cfg.attack, defense: cfg.defense, attackRange: 1 } as Combat);
-  world.addComponent(id, { type: 'label', name: cfg.name } as Label);
+  world.addComponent(id, { type: 'health',    current: hp, max: hp } as Health);
+  world.addComponent(id, { type: 'faction',   team: 'enemy' } as Faction);
+  world.addComponent(id, { type: 'status',    effects: new Map() } as StatusEffect);
+  world.addComponent(id, { type: 'movement',  range: cfg.moveRange, canFly: false } as Movement);
+  world.addComponent(id, { type: 'combat',    attackPower: cfg.attack, defense: cfg.defense, attackRange: 1 } as Combat);
+  world.addComponent(id, { type: 'label',     name: cfg.name } as Label);
   world.addComponent(id, {
-    type: 'ai',
-    strategy: cfg.strategy,
-    alerted: false,
-    alertRange: cfg.strategy === 'ranged' ? 7 : 5,
+    type:        'ai',
+    strategy:    cfg.strategy,
+    alerted:     false,
+    alertRange:  cfg.strategy === 'ranged' ? 7 : 5,
     moveCounter: 0,
   } as AI);
   return id;
 }
 
-// ─── MAP GENERATION ──────────────────────────────────────────────────────────
+// ─── MAP GENERATION ───────────────────────────────────────────────────────────
 
-export function generateMap(width: number, height: number): GeneratedMap {
-  const dungeon = new ROT.Map.Digger(width, height, {
-    roomWidth: [4, 9],
-    roomHeight: [3, 6],
-    corridorLength: [2, 5],
-    dugPercentage: 0.4,
-  });
+export function generateMap(width: number = MAP_W, height: number = MAP_H): GeneratedMap {
+  const dungeon = new ROT.Map.Digger(width, height, DUNGEON_OPTIONS);
 
-  const wallMap: boolean[][] = [];
-  for (let r = 0; r < height; r++) {
-    wallMap[r] = [];
-    for (let c = 0; c < width; c++) wallMap[r][c] = true;
-  }
+  const wallMap: boolean[][] = Array.from({ length: height }, () => new Array(width).fill(true));
 
   dungeon.create((x: number, y: number, wall: number) => {
     if (y >= 0 && y < height && x >= 0 && x < width) wallMap[y][x] = wall === 1;
   });
 
-  const gameplay: (AsciiCell | null)[][] = [];
-  for (let r = 0; r < height; r++) {
-    gameplay[r] = [];
-    for (let c = 0; c < width; c++) {
-      if (wallMap[r][c]) {
-        gameplay[r][c] = { char: pick(WALL_CHARS), fg: pick(WALL_COLORS), alpha: 0.9 };
-      } else {
-        gameplay[r][c] = { char: pick(FLOOR_CHARS), fg: pick(FLOOR_COLORS), alpha: 0.7 };
-      }
-    }
-  }
+  // Gameplay layer
+  const gameplay: (AsciiCell | null)[][] = wallMap.map(row =>
+    row.map(isWall => isWall
+      ? { char: pick(WALL_CHARS),  fg: pick(WALL_COLORS),  alpha: 0.9 }
+      : { char: pick(FLOOR_CHARS), fg: pick(FLOOR_COLORS), alpha: 0.7 },
+    )
+  );
 
-  const bgScale = 1.4;
-  const bgW = Math.ceil(width * bgScale), bgH = Math.ceil(height * bgScale);
+  // Background layers (larger than gameplay for parallax coverage)
+  const bgW = Math.ceil(width  * BG_LAYER_SCALE);
+  const bgH = Math.ceil(height * BG_LAYER_SCALE);
 
-  const bgFar: (AsciiCell | null)[][] = [];
-  for (let r = 0; r < bgH; r++) {
-    bgFar[r] = [];
-    for (let c = 0; c < bgW; c++) {
+  const bgFar: (AsciiCell | null)[][] = Array.from({ length: bgH }, () =>
+    Array.from({ length: bgW }, () => {
       const ch = pick(BG_FAR_CHARS);
-      bgFar[r][c] = ch === ' ' ? null : { char: ch, fg: pick(BG_FAR_COLORS), alpha: 0.3 + Math.random() * 0.2 };
-    }
-  }
+      return ch === ' ' ? null : { char: ch, fg: pick(BG_FAR_COLORS), alpha: 0.3 + Math.random() * 0.2 };
+    })
+  );
 
-  const bgMid: (AsciiCell | null)[][] = [];
-  for (let r = 0; r < bgH; r++) {
-    bgMid[r] = [];
-    for (let c = 0; c < bgW; c++) {
+  const bgMid: (AsciiCell | null)[][] = Array.from({ length: bgH }, () =>
+    Array.from({ length: bgW }, () => {
       const ch = pick(BG_MID_CHARS);
-      bgMid[r][c] = ch === ' ' ? null : { char: ch, fg: pick(BG_MID_COLORS), alpha: 0.2 + Math.random() * 0.3 };
-    }
-  }
+      return ch === ' ' ? null : { char: ch, fg: pick(BG_MID_COLORS), alpha: 0.2 + Math.random() * 0.3 };
+    })
+  );
 
-  const fgW = Math.ceil(width * 1.2), fgH = Math.ceil(height * 1.2);
-  const foreground: (AsciiCell | null)[][] = [];
-  for (let r = 0; r < fgH; r++) {
-    foreground[r] = [];
-    for (let c = 0; c < fgW; c++) {
+  // Foreground layer
+  const fgW = Math.ceil(width  * FG_LAYER_SCALE);
+  const fgH = Math.ceil(height * FG_LAYER_SCALE);
+  const foreground: (AsciiCell | null)[][] = Array.from({ length: fgH }, () =>
+    Array.from({ length: fgW }, () => {
       const ch = pick(FG_CHARS);
-      foreground[r][c] = ch === ' ' ? null : { char: ch, fg: pick(FG_COLORS), alpha: 0.15 + Math.random() * 0.15 };
-    }
-  }
+      return ch === ' ' ? null : { char: ch, fg: pick(FG_COLORS), alpha: 0.15 + Math.random() * 0.15 };
+    })
+  );
 
-  const walkable: boolean[][] = [];
-  for (let r = 0; r < height; r++) {
-    walkable[r] = [];
-    for (let c = 0; c < width; c++) walkable[r][c] = !wallMap[r][c];
-  }
+  const walkable: boolean[][] = wallMap.map(row => row.map(isWall => !isWall));
 
   return { gameplay, bgFar, bgMid, foreground, width, height, walkable };
 }
 
+// ─── WORLD POPULATION ────────────────────────────────────────────────────────
+
+/**
+ * Creates terrain, player, and enemy entities from a generated map.
+ * Returns the player's EntityId and the remaining floor positions.
+ */
 export function populateWorld(
   world: World,
-  map: GeneratedMap
+  map: GeneratedMap,
 ): { playerId: number; floorPositions: { col: number; row: number }[] } {
   const floorPositions: { col: number; row: number }[] = [];
 
-  // Create terrain entities
+  // Terrain entities
   for (let r = 0; r < map.height; r++) {
     for (let c = 0; c < map.width; c++) {
       const cell = map.gameplay[r][c];
       if (!cell) continue;
-      const isWall = WALL_CHARS.includes(cell.char);
+      const isWall = (WALL_CHARS as readonly string[]).includes(cell.char);
       const id = world.createEntity();
       world.addComponent(id, { type: 'position', col: c, row: r, layer: 'gameplay' } as Position);
       world.addComponent(id, { type: 'renderable', char: cell.char, fg: cell.fg, alpha: cell.alpha } as Renderable);
       world.addComponent(id, {
-        type: 'terrain',
-        walkable: !isWall,
+        type:        'terrain',
+        walkable:    !isWall,
         transparent: !isWall,
-        properties: new Set(isWall ? [] : ['flammable']),
+        properties:  new Set(isWall ? [] : ['flammable']),
       } as Terrain);
       if (!isWall) floorPositions.push({ col: c, row: r });
     }
   }
 
-  // Shuffle floor positions
-  for (let i = floorPositions.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [floorPositions[i], floorPositions[j]] = [floorPositions[j], floorPositions[i]];
-  }
+  shuffleInPlace(floorPositions);
 
-  // Place player
+  // Player entity
   const playerPos = floorPositions.pop()!;
-  const playerId = world.createEntity();
-  world.addComponent(playerId, { type: 'position', col: playerPos.col, row: playerPos.row, layer: 'gameplay' } as Position);
+  const playerId  = world.createEntity();
+  world.addComponent(playerId, { type: 'position',  col: playerPos.col, row: playerPos.row, layer: 'gameplay' } as Position);
   world.addComponent(playerId, { type: 'renderable', char: '@', fg: 0x44eeff } as Renderable);
-  world.addComponent(playerId, { type: 'health', current: 100, max: 100 } as Health);
-  world.addComponent(playerId, { type: 'faction', team: 'player' } as Faction);
-  world.addComponent(playerId, { type: 'status', effects: new Map() } as StatusEffect);
-  world.addComponent(playerId, { type: 'movement', range: 5, canFly: false } as Movement);
-  world.addComponent(playerId, { type: 'combat', attackPower: 15, defense: 3, attackRange: 1 } as Combat);
+  world.addComponent(playerId, { type: 'health',    current: PLAYER_HP_MAX, max: PLAYER_HP_MAX } as Health);
+  world.addComponent(playerId, { type: 'faction',   team: 'player' } as Faction);
+  world.addComponent(playerId, { type: 'status',    effects: new Map() } as StatusEffect);
+  world.addComponent(playerId, { type: 'movement',  range: PLAYER_MOVE_RANGE, canFly: false } as Movement);
+  world.addComponent(playerId, {
+    type: 'combat',
+    attackPower:  PLAYER_ATTACK_POWER,
+    defense:      PLAYER_DEFENSE,
+    attackRange:  PLAYER_ATTACK_RANGE,
+  } as Combat);
   world.addComponent(playerId, {
     type: 'abilities',
-    list: [makeFlameBolt(), makeArcLightning(), makeFrostShard(), makePoisonCloud()],
+    list: makeDefaultPlayerAbilities(),
   } as Abilities);
   world.addComponent(playerId, { type: 'label', name: 'Hero' } as Label);
 
-  // Place enemies — 9–14 total
-  const targetCount = 9 + Math.floor(Math.random() * 6);
+  // Enemy entities — ENEMY_COUNT_MIN + rand(0, ENEMY_COUNT_VARIANCE)
+  const targetCount = ENEMY_COUNT_MIN + randomInt(0, ENEMY_COUNT_VARIANCE - 1);
   let spawned = 0;
 
   while (spawned < targetCount && floorPositions.length > 0) {
-    const cfg = pickEnemyType();
+    const cfg   = weightedPick(ENEMY_TYPES);
     const count = cfg.groupSize ?? 1;
-
     if (floorPositions.length < count) break;
-
     for (let g = 0; g < count && spawned < targetCount; g++) {
-      const pos = floorPositions.pop()!;
-      spawnEnemy(world, pos, cfg);
+      spawnEnemy(world, floorPositions.pop()!, cfg);
       spawned++;
     }
   }

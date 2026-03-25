@@ -8,22 +8,13 @@
 
 import { Container, Graphics, Text, TextStyle } from 'pixi.js';
 import { World, Health, StatusEffect, Label } from '../core/ECS';
-
-const W          = 210;
-const PAD        = 10;
-const BAR_W      = 190;
-const BAR_H      = 10;
-const STATUS_H   = 20;   // extra height when effects are present
-const BASE_H     = 64;   // height with no status line
-
-const STATUS_COLORS: Record<string, number> = {
-  burning:  0xff5500,
-  shocked:  0xffff00,
-  slowed:   0x88ccff,
-  poisoned: 0x66ff44,
-  wet:      0x44aaff,
-  stunned:  0xffaaff,
-};
+import { lerpColor, hpColor } from '../utils/colors';
+import { STATUS_COLORS } from '../constants/rendering';
+import {
+  TOOLTIP_W, TOOLTIP_PAD, TOOLTIP_BAR_W, TOOLTIP_BAR_H,
+  TOOLTIP_STATUS_H, TOOLTIP_BASE_H, TOOLTIP_OFFSET_X, TOOLTIP_OFFSET_Y,
+  UI_FONT_FAMILY,
+} from '../constants/ui';
 
 export class TooltipOverlay {
   readonly container: Container;
@@ -37,27 +28,20 @@ export class TooltipOverlay {
 
   constructor() {
     this.container = new Container();
-    this.container.visible = false;
-    this.container.eventMode = 'none'; // don't intercept input
+    this.container.visible   = false;
+    this.container.eventMode = 'none';
 
     this.bg = new Graphics();
     this.container.addChild(this.bg);
 
     const nameStyle = new TextStyle({
-      fontFamily: '"Courier New", monospace',
-      fontSize: 16,
-      fill: 0xddeeff,
-      fontWeight: 'bold',
+      fontFamily: UI_FONT_FAMILY, fontSize: 16, fill: 0xddeeff, fontWeight: 'bold',
     });
     const hpStyle = new TextStyle({
-      fontFamily: '"Courier New", monospace',
-      fontSize: 13,
-      fill: 0xaaccee,
+      fontFamily: UI_FONT_FAMILY, fontSize: 13, fill: 0xaaccee,
     });
     const statusStyle = new TextStyle({
-      fontFamily: '"Courier New", monospace',
-      fontSize: 13,
-      fill: 0xffdd88,
+      fontFamily: UI_FONT_FAMILY, fontSize: 13, fill: 0xffdd88,
     });
 
     this.nameText   = new Text({ text: '', style: nameStyle });
@@ -66,16 +50,16 @@ export class TooltipOverlay {
     this.hpBarFill  = new Graphics();
     this.statusText = new Text({ text: '', style: statusStyle });
 
-    this.nameText.x  = PAD;
-    this.nameText.y  = PAD;
-    this.hpBarBg.x   = PAD;
-    this.hpBarBg.y   = PAD + 22;
-    this.hpBarFill.x = PAD;
-    this.hpBarFill.y = PAD + 22;
-    this.hpText.x    = PAD;
-    this.hpText.y    = PAD + 34;
-    this.statusText.x = PAD;
-    this.statusText.y = PAD + 50;
+    this.nameText.x   = TOOLTIP_PAD;
+    this.nameText.y   = TOOLTIP_PAD;
+    this.hpBarBg.x    = TOOLTIP_PAD;
+    this.hpBarBg.y    = TOOLTIP_PAD + 22;
+    this.hpBarFill.x  = TOOLTIP_PAD;
+    this.hpBarFill.y  = TOOLTIP_PAD + 22;
+    this.hpText.x     = TOOLTIP_PAD;
+    this.hpText.y     = TOOLTIP_PAD + 34;
+    this.statusText.x = TOOLTIP_PAD;
+    this.statusText.y = TOOLTIP_PAD + 50;
 
     this.container.addChild(this.hpBarBg);
     this.container.addChild(this.hpBarFill);
@@ -92,9 +76,9 @@ export class TooltipOverlay {
     screenW: number,
     screenH: number,
   ) {
-    const label   = world.getComponent<Label>(entityId, 'label');
-    const health  = world.getComponent<Health>(entityId, 'health');
-    const status  = world.getComponent<StatusEffect>(entityId, 'status');
+    const label  = world.getComponent<Label>(entityId, 'label');
+    const health = world.getComponent<Health>(entityId, 'health');
+    const status = world.getComponent<StatusEffect>(entityId, 'status');
 
     const name    = label?.name ?? '???';
     const hp      = health ? Math.max(0, Math.ceil(health.current)) : 0;
@@ -108,34 +92,28 @@ export class TooltipOverlay {
       ? effects.map(e => `● ${e}`).join('  ')
       : '';
 
-    // HP bar colour: green → yellow → red based on ratio
-    const barColor = ratio > 0.5
-      ? lerpColor(0xffcc00, 0x44dd44, (ratio - 0.5) * 2)
-      : lerpColor(0xff3333, 0xffcc00, ratio * 2);
+    const barColor = hpColor(ratio);
+    this.hpBarBg.clear().rect(0, 0, TOOLTIP_BAR_W, TOOLTIP_BAR_H).fill({ color: 0x112233, alpha: 0.9 });
+    this.hpBarFill.clear().rect(0, 0, Math.round(TOOLTIP_BAR_W * ratio), TOOLTIP_BAR_H).fill({ color: barColor, alpha: 1 });
 
-    this.hpBarBg.clear().rect(0, 0, BAR_W, BAR_H).fill({ color: 0x112233, alpha: 0.9 });
-    this.hpBarFill.clear().rect(0, 0, Math.round(BAR_W * ratio), BAR_H).fill({ color: barColor, alpha: 1 });
-
-    // Status effect dots colour override
+    // Status effect dot colour (dominant effect)
     if (effects.length > 0) {
       const domColor = STATUS_COLORS[effects[0]] ?? 0xffdd88;
       (this.statusText.style as TextStyle).fill = domColor;
     }
 
-    // Panel height
-    const H = effects.length > 0 ? BASE_H + STATUS_H : BASE_H;
-
+    const H = effects.length > 0 ? TOOLTIP_BASE_H + TOOLTIP_STATUS_H : TOOLTIP_BASE_H;
     this.bg.clear()
-      .roundRect(0, 0, W, H, 6)
+      .roundRect(0, 0, TOOLTIP_W, H, 6)
       .fill({ color: 0x0d1825, alpha: 0.93 })
       .stroke({ color: 0x3366aa, width: 1.5, alpha: 0.85 });
 
-    // Position near tap, keep inside screen
-    let x = tapX + 20;
-    let y = tapY - H - 16;
-    if (x + W > screenW - 8) x = tapX - W - 20;
+    // Position near tap, clamped to screen
+    let x = tapX + TOOLTIP_OFFSET_X;
+    let y = tapY - H - TOOLTIP_OFFSET_Y;
+    if (x + TOOLTIP_W > screenW - 8) x = tapX - TOOLTIP_W - TOOLTIP_OFFSET_X;
     if (x < 8) x = 8;
-    if (y < 8) y = tapY + 20;
+    if (y < 8) y = tapY + TOOLTIP_OFFSET_X;
     if (y + H > screenH - 8) y = screenH - H - 8;
 
     this.container.x = x;
@@ -148,11 +126,5 @@ export class TooltipOverlay {
   }
 }
 
-function lerpColor(a: number, b: number, t: number): number {
-  const ar = (a >> 16) & 0xff, ag = (a >> 8) & 0xff, ab = a & 0xff;
-  const br = (b >> 16) & 0xff, bg = (b >> 8) & 0xff, bb = b & 0xff;
-  const r = Math.round(ar + (br - ar) * t);
-  const g = Math.round(ag + (bg - ag) * t);
-  const bl = Math.round(ab + (bb - ab) * t);
-  return (r << 16) | (g << 8) | bl;
-}
+// Re-export for any file that still needs it without importing utils/colors
+export { lerpColor };

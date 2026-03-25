@@ -10,10 +10,9 @@
  */
 
 import { Container, Graphics, Text, TextStyle } from 'pixi.js';
+import { DPAD_BTN_SIZE, DPAD_BTN_GAP, UI_FONT_FAMILY } from '../constants/ui';
 
-const BTN  = 38;  // button size px
-const GAP  = 5;   // gap between buttons
-const STEP = BTN + GAP;
+const STEP = DPAD_BTN_SIZE + DPAD_BTN_GAP;
 
 // [gridCol, gridRow, dx, dy, label]
 const DIR_BUTTONS: [number, number, number, number, string][] = [
@@ -34,12 +33,10 @@ export class DPad {
     private onDirection: (dx: number, dy: number) => void,
     private onWait: () => void,
   ) {
-    // 'passive' lets pointer events reach children without the container itself capturing them
     this.container = new Container();
     this.container.eventMode = 'passive';
 
     this.buildBtn(1, 1, '…', 0x223344, 0x4488aa, () => this.onWait());
-
     for (const [gc, gr, dx, dy, arrow] of DIR_BUTTONS) {
       this.buildBtn(gc, gr, arrow, 0x0d1a2e, 0x334466, () => this.onDirection(dx, dy));
     }
@@ -52,19 +49,19 @@ export class DPad {
     callback: () => void,
   ) {
     const gfx = new Graphics();
-    gfx.roundRect(0, 0, BTN, BTN, 6)
+    gfx.roundRect(0, 0, DPAD_BTN_SIZE, DPAD_BTN_SIZE, 6)
       .fill({ color: fillColor, alpha: 0.88 })
       .stroke({ color: strokeColor, alpha: 0.85, width: 1.5 });
 
     gfx.x = gc * STEP;
     gfx.y = gr * STEP;
     gfx.eventMode = 'static';
-    gfx.cursor = 'pointer';
+    gfx.cursor    = 'pointer';
 
     gfx.on('pointerdown', (e) => {
       e.stopPropagation();
       gfx.clear();
-      gfx.roundRect(0, 0, BTN, BTN, 6)
+      gfx.roundRect(0, 0, DPAD_BTN_SIZE, DPAD_BTN_SIZE, 6)
         .fill({ color: 0x1a3060, alpha: 0.95 })
         .stroke({ color: 0x6699cc, alpha: 1, width: 2 });
       callback();
@@ -72,23 +69,23 @@ export class DPad {
 
     const reset = () => {
       gfx.clear();
-      gfx.roundRect(0, 0, BTN, BTN, 6)
+      gfx.roundRect(0, 0, DPAD_BTN_SIZE, DPAD_BTN_SIZE, 6)
         .fill({ color: fillColor, alpha: 0.88 })
         .stroke({ color: strokeColor, alpha: 0.85, width: 1.5 });
     };
-    gfx.on('pointerup', reset);
+    gfx.on('pointerup',        reset);
     gfx.on('pointerupoutside', reset);
 
     const lblStyle = new TextStyle({
-      fontFamily: '"Courier New", monospace',
-      fontSize: label.length === 1 && label > '\u00ff' ? 14 : 16,
-      fill: fillColor === 0x223344 ? 0x66aacc : 0x99bbdd,
+      fontFamily: UI_FONT_FAMILY,
+      fontSize:   label.length === 1 && label > '\u00ff' ? 14 : 16,
+      fill:       fillColor === 0x223344 ? 0x66aacc : 0x99bbdd,
       fontWeight: 'bold',
     });
     const lbl = new Text({ text: label, style: lblStyle });
     lbl.anchor.set(0.5);
-    lbl.x = BTN / 2;
-    lbl.y = BTN / 2;
+    lbl.x = DPAD_BTN_SIZE / 2;
+    lbl.y = DPAD_BTN_SIZE / 2;
     lbl.eventMode = 'none';
     gfx.addChild(lbl);
 

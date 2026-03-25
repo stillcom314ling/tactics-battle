@@ -5,9 +5,18 @@
  * Entities are just IDs. Components are plain objects stored by type.
  * Systems are functions that iterate over entities with specific components.
  *
- * This keeps things simple for Claude Code to extend while still enabling
- * the composable "Fire + Oil = Explosion" interaction patterns you want.
+ * This keeps things simple while enabling composable "Fire + Oil = Explosion"
+ * interaction patterns.
  */
+
+import {
+  STATUS_DURATION_BURNING,
+  STATUS_DURATION_POISONED,
+  STATUS_DURATION_SLOWED,
+  STATUS_DURATION_STUNNED,
+  STATUS_DURATION_SHOCKED,
+  STATUS_DURATION_WET,
+} from '../constants/combat';
 
 export type EntityId = number;
 
@@ -20,7 +29,8 @@ export interface Position extends Component {
   type: 'position';
   col: number;
   row: number;
-  layer: string; // which render layer this entity appears on
+  /** Which render layer this entity appears on (e.g. 'gameplay'). */
+  layer: string;
 }
 
 // --- RENDERABLE ---
@@ -46,20 +56,23 @@ export interface Faction extends Component {
 }
 
 // --- STATUS EFFECTS ---
-// effects: Map of effect name → turns remaining (-1 = permanent until cleared)
+/** effects: Map of effect name → turns remaining (-1 = permanent until cleared). */
 export interface StatusEffect extends Component {
   type: 'status';
   effects: Map<string, number>;
 }
 
-// Default durations for each status effect
+/**
+ * Default durations per status effect.
+ * Values live in constants/combat.ts so they can be tuned in one place.
+ */
 export const STATUS_DURATIONS: Record<string, number> = {
-  burning:  3,
-  poisoned: 4,
-  slowed:   2,
-  stunned:  1,
-  shocked:  1,
-  wet:      3,
+  burning:  STATUS_DURATION_BURNING,
+  poisoned: STATUS_DURATION_POISONED,
+  slowed:   STATUS_DURATION_SLOWED,
+  stunned:  STATUS_DURATION_STUNNED,
+  shocked:  STATUS_DURATION_SHOCKED,
+  wet:      STATUS_DURATION_WET,
 };
 
 /** Apply a status effect, keeping the longer duration if already present. */
@@ -100,8 +113,10 @@ export interface Terrain extends Component {
 }
 
 // --- ABILITY (a single spell / skill) ---
-// Uses per-level charges instead of per-turn cooldowns.
-// Charges refill at the start of each new level.
+/**
+ * Uses per-level charges instead of per-turn cooldowns.
+ * Charges refill at the start of each new level.
+ */
 export interface Ability {
   id: string;
   name: string;
@@ -110,7 +125,7 @@ export interface Ability {
   pattern: 'single' | 'line' | 'aoe' | 'self';
   aoeRadius?: number;
   damage: number;
-  effects: string[]; // status labels to apply on hit
+  effects: string[];   // status labels to apply on hit
   charges: number;     // remaining uses this level
   chargesMax: number;  // total uses per level
 }
@@ -127,7 +142,7 @@ export interface AI extends Component {
   strategy: 'basic' | 'ranged' | 'brute' | 'swarm';
   alerted: boolean;    // true = rush player regardless of normal caution
   alertRange: number;  // passive detection radius
-  moveCounter: number; // brute: skips movement every other turn
+  moveCounter: number; // brute: incremented each turn, acts only on even counts
 }
 
 // --- LABEL ---
@@ -136,7 +151,7 @@ export interface Label extends Component {
   name: string;
 }
 
-// ---------- THE WORLD ----------
+// ─── THE WORLD ────────────────────────────────────────────────────────────────
 
 export class World {
   private nextId: EntityId = 1;
@@ -188,9 +203,7 @@ export class World {
     return results;
   }
 
-  /**
-   * Get all entity IDs.
-   */
+  /** Get all entity IDs. */
   allEntities(): EntityId[] {
     return [...this.entities];
   }

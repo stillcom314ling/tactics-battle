@@ -2,7 +2,7 @@
  * SPELL SYSTEM
  *
  * Resolves spell casts: hit detection, damage, status effects, interactions.
- * Each spell is an Ability data object — adding a new spell is just a new object.
+ * Each spell is an Ability data object — adding a new spell is a single factory function.
  *
  * Spell patterns:
  *   single — one tile at target position
@@ -11,17 +11,20 @@
  *   self   — caster's tile only
  *
  * Spells use per-level CHARGES instead of per-turn cooldowns.
- * This rewards aggressive forward play — no reason to wait between rooms.
+ * This rewards aggressive forward play — no waiting between rooms.
  * Charges refill when populateWorld() is called for a new level.
  */
 
-import { World, EntityId, Ability, Abilities, Position, Health, StatusEffect, applyStatus, STATUS_DURATIONS } from '../core/ECS';
+import {
+  World, EntityId, Ability, Abilities, Position, Health, StatusEffect,
+  applyStatus, STATUS_DURATIONS,
+} from '../core/ECS';
 import { processInteractions } from '../core/InteractionSystem';
 import { GeneratedMap } from './MapGenerator';
 
-// ─── STARTER SPELLS ─────────────────────────────────────────────────────────
+// ─── STARTER SPELL FACTORIES ─────────────────────────────────────────────────
 // Balance note: all spells available simultaneously for testing.
-// In production these will be unlocked/slotted one at a time.
+// In production these will be unlocked/slotted progressively.
 
 export function makeFlameBolt(): Ability {
   return {
@@ -59,9 +62,14 @@ export function makePoisonCloud(): Ability {
   };
 }
 
-// ─── TILE GEOMETRY ──────────────────────────────────────────────────────────
+/** Returns the default set of player abilities for a new game / floor reset. */
+export function makeDefaultPlayerAbilities(): Ability[] {
+  return [makeFlameBolt(), makeArcLightning(), makeFrostShard(), makePoisonCloud()];
+}
 
-/** All tiles hit by a spell given caster + target position */
+// ─── TILE GEOMETRY ───────────────────────────────────────────────────────────
+
+/** All tiles hit by a spell given caster + target position. */
 export function getSpellTiles(
   casterCol: number, casterRow: number,
   targetCol: number, targetRow: number,
@@ -92,26 +100,28 @@ export function getSpellTiles(
     }
 
     case 'line': {
+      // Bresenham line from caster (exclusive) to target (inclusive)
       const tiles: [number, number][] = [];
       let x = casterCol, y = casterRow;
-      const dx = Math.abs(targetCol - x), dy = Math.abs(targetRow - y);
-      const sx = x < targetCol ? 1 : -1, sy = y < targetRow ? 1 : -1;
-      let err = dx - dy;
+      const adx = Math.abs(targetCol - x), ady = Math.abs(targetRow - y);
+      const sx = x < targetCol ? 1 : -1;
+      const sy = y < targetRow ? 1 : -1;
+      let err = adx - ady;
       while (true) {
         if ((x !== casterCol || y !== casterRow) && inBounds(x, y)) {
           tiles.push([x, y]);
         }
         if (x === targetCol && y === targetRow) break;
         const e2 = 2 * err;
-        if (e2 > -dy) { err -= dy; x += sx; }
-        if (e2 < dx)  { err += dx; y += sy; }
+        if (e2 > -ady) { err -= ady; x += sx; }
+        if (e2 < adx)  { err += adx; y += sy; }
       }
       return tiles;
     }
   }
 }
 
-/** All tiles in a circle of `range` around (col, row) for targeting highlight */
+/** All tiles in a circle of `range` around (col, row) for targeting highlight. */
 export function getRangeTiles(
   col: number, row: number,
   range: number,
@@ -132,7 +142,7 @@ export function getRangeTiles(
   return tiles;
 }
 
-// ─── RESOLUTION ─────────────────────────────────────────────────────────────
+// ─── RESOLUTION ──────────────────────────────────────────────────────────────
 
 /** Cast a spell: applies damage, status effects, and runs interaction rules. */
 export function resolveSpell(
@@ -170,9 +180,9 @@ export function resolveSpell(
 
       // Run synergy rules (wet+lightning, burning+terrain, etc.)
       processInteractions(world, targetId, {
-        trigger: 'attack',
-        sourceId: caster,
-        data: { element: ability.element, damage: ability.damage },
+        trigger:    'attack',
+        sourceId:   caster,
+        data:       { element: ability.element, damage: ability.damage },
         addMessage,
       });
 

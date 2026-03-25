@@ -1,87 +1,94 @@
 /**
  * TURN MANAGER
- * 
- * Handles turn-based flow for tactical combat.
- * Uses rot.js scheduler under the hood.
- * 
- * Flow: player phase -> enemy phase -> environment phase -> repeat
+ *
+ * Owns the authoritative turn-phase state for the game loop.
+ * Previously Game.ts managed phase with raw string fields and setTimeout calls.
+ * Now Game.ts delegates all phase bookkeeping here.
+ *
+ * Phase flow:
+ *   player → (player acts) → endPlayerTurn()
+ *        → enemy  → (AISystem.processEnemyTurns()) → endEnemyPhase()
+ *        → player → … repeat
+ *
+ * The rot.js Speed scheduler is retained internally for future use (e.g.
+ * per-entity speed variation), but phase transitions are driven explicitly
+ * by Game.ts for clarity and testability.
  */
 
 import * as ROT from 'rot-js';
 import { EntityId, World } from './ECS';
 
-export type TurnPhase = 'player' | 'enemy' | 'environment';
+export type TurnPhase = 'player' | 'enemy' | 'game_over';
 
 export interface TurnActor {
   entityId: EntityId;
-  phase: TurnPhase;
-  speed: number; // higher = acts more often
+  speed:    number;
 }
 
 type WrappedActor = TurnActor & { getSpeed: () => number };
 
 export class TurnManager {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private scheduler: InstanceType<typeof ROT.Scheduler.Speed>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private engine: ROT.Engine;
-  public currentActor: TurnActor | null = null;
-  public currentPhase: TurnPhase = 'player';
-  public turnNumber: number = 0;
+  private _phase:      TurnPhase = 'player';
+  private _turnNumber: number    = 0;
 
-  // Callbacks for when a phase starts
-  public onPhaseStart: ((phase: TurnPhase) => void) | null = null;
-  public onTurnStart: ((actor: TurnActor) => void) | null = null;
+  // rot.js Speed scheduler — available for future per-entity speed variation
+  private scheduler: InstanceType<typeof ROT.Scheduler.Speed>;
+  private engine:    ROT.Engine;
+
+  /** Fired when the phase changes (e.g. to dim the HUD during enemy turns). */
+  public onPhaseChange: ((phase: TurnPhase) => void) | null = null;
 
   constructor(private world: World) {
     this.scheduler = new ROT.Scheduler.Speed();
-    this.engine = new ROT.Engine(this.scheduler);
+    this.engine    = new ROT.Engine(this.scheduler);
   }
 
-  addActor(actor: TurnActor) {
-    // rot.js Speed scheduler needs a getSpeed() method
-    const wrapped: WrappedActor = {
-      ...actor,
-      getSpeed: () => actor.speed,
-    };
+  // ── Getters ────────────────────────────────────────────────────────────────
+
+  get phase():      TurnPhase { return this._phase; }
+  get turnNumber(): number    { return this._turnNumber; }
+  get isPlayerTurn(): boolean { return this._phase === 'player'; }
+  get isGameOver():   boolean { return this._phase === 'game_over'; }
+
+  // ── Phase transitions ──────────────────────────────────────────────────────
+
+  /** Player has finished acting. Switch to enemy phase. */
+  endPlayerTurn(): void {
+    this._turnNumber++;
+    this._setPhase('enemy');
+  }
+
+  /** All enemies have acted. Return to player phase. */
+  endEnemyPhase(): void {
+    this._setPhase('player');
+  }
+
+  /** Player has died. No more input accepted. */
+  setGameOver(): void {
+    this._setPhase('game_over');
+  }
+
+  private _setPhase(phase: TurnPhase): void {
+    this._phase = phase;
+    this.onPhaseChange?.(phase);
+  }
+
+  // ── rot.js actor registry (for future use) ────────────────────────────────
+
+  addActor(actor: TurnActor): void {
+    const wrapped: WrappedActor = { ...actor, getSpeed: () => actor.speed };
     this.scheduler.add(wrapped, true);
   }
 
-  removeActor(entityId: EntityId) {
-    // rot.js doesn't have a great removal API, so we clear and rebuild
-    // This is fine for tactical games with ~20 units
-    const actors: TurnActor[] = [];
-    let next = this.scheduler.next();
+  removeActor(entityId: EntityId): void {
+    // rot.js has no direct remove — drain, filter, re-add
+    const retained: TurnActor[] = [];
+    let next = this.scheduler.next() as WrappedActor | null;
     while (next) {
-      if (next.entityId !== entityId) {
-        actors.push(next);
-      }
-      next = this.scheduler.next();
+      if (next.entityId !== entityId) retained.push(next);
+      next = this.scheduler.next() as WrappedActor | null;
     }
     this.scheduler.clear();
-    for (const a of actors) {
-      this.addActor(a);
-    }
-  }
-
-  /**
-   * Get the next actor. Returns null if no actors remain.
-   */
-  nextTurn(): TurnActor | null {
-    const actor = this.scheduler.next();
-    if (!actor) return null;
-
-    // Track phase transitions
-    if (actor.phase !== this.currentPhase) {
-      this.currentPhase = actor.phase;
-      if (actor.phase === 'player') {
-        this.turnNumber++;
-      }
-      this.onPhaseStart?.(this.currentPhase);
-    }
-
-    this.currentActor = actor;
-    this.onTurnStart?.(actor);
-    return actor;
+    for (const a of retained) this.addActor(a);
   }
 }
