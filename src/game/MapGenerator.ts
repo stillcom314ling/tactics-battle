@@ -188,7 +188,7 @@ export function populateWorld(
   const playerPos = floorPositions.pop()!;
   const playerId  = world.createEntity();
   world.addComponent(playerId, { type: 'position',  col: playerPos.col, row: playerPos.row, layer: 'gameplay' } as Position);
-  world.addComponent(playerId, { type: 'renderable', char: '@', fg: 0xccffee } as Renderable);
+  world.addComponent(playerId, { type: 'renderable', char: '@', fg: 0x00ffcc } as Renderable);
   world.addComponent(playerId, { type: 'health',    current: PLAYER_HP_MAX, max: PLAYER_HP_MAX } as Health);
   world.addComponent(playerId, { type: 'faction',   team: 'player' } as Faction);
   world.addComponent(playerId, { type: 'status',    effects: new Map() } as StatusEffect);

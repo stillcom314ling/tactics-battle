@@ -25,20 +25,20 @@ export interface EnemyTypeConfig {
 }
 
 export const ENEMY_TYPES: EnemyTypeConfig[] = [
-  // Goblin — basic rushdown, low HP — dusty peach
-  { char: 'g', name: 'Goblin',  color: 0xffccaa,
+  // Goblin — basic rushdown, low HP — vivid orange-red
+  { char: 'g', name: 'Goblin',  color: 0xff4422,
     hpMin: 18, hpMax: 26,  attack: 6,  defense: 1, moveRange: 2,
     strategy: 'basic', weight: 3 },
-  // Archer — stays at range, shoots; fragile — pale straw
-  { char: 'a', name: 'Archer',  color: 0xeeeebb,
+  // Archer — stays at range, shoots; fragile — electric yellow
+  { char: 'a', name: 'Archer',  color: 0xffdd00,
     hpMin: 8,  hpMax: 12,  attack: 5,  defense: 0, moveRange: 3,
     strategy: 'ranged', weight: 2 },
-  // Brute — massive HP, moves every other turn — pale dusty rose
-  { char: 'B', name: 'Brute',   color: 0xffbbbb,
+  // Brute — massive HP, moves every other turn — vivid crimson
+  { char: 'B', name: 'Brute',   color: 0xff2244,
     hpMin: 60, hpMax: 75,  attack: 13, defense: 4, moveRange: 2,
     strategy: 'brute', weight: 1 },
-  // Swarmer — very weak, always spawns in clusters — pale sage
-  { char: 'z', name: 'Swarmer', color: 0xbbddcc,
+  // Swarmer — very weak, always spawns in clusters — acid green
+  { char: 'z', name: 'Swarmer', color: 0x44ff88,
     hpMin: 8,  hpMax: 14,  attack: 3,  defense: 0, moveRange: 3,
     strategy: 'swarm', weight: 3, groupSize: 3 },
 ];

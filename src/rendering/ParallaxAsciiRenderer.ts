@@ -19,9 +19,16 @@ import { ASCII_FONT_FAMILY } from '../constants/rendering';
 
 export interface AsciiCell {
   char: string;
-  fg: number;       // hex color e.g. 0xffffff
-  bg?: number;      // optional background tint
-  alpha?: number;   // 0–1, defaults to 1
+  fg: number;        // hex color e.g. 0xffffff
+  bg?: number;       // optional background tint
+  alpha?: number;    // 0–1, defaults to 1
+  /**
+   * Override font size for this cell only.
+   * Useful for making a "hero" character larger than surrounding detail chars
+   * (e.g. actor centre glyph at 16px inside an 8px sub-cell grid).
+   * Defaults to layer.config.cellSize when omitted.
+   */
+  fontSize?: number;
 }
 
 export interface LayerConfig {
@@ -120,8 +127,8 @@ export class ParallaxAsciiRenderer {
 
     const style = new TextStyle({
       fontFamily: this.defaultStyle.fontFamily,
-      fontSize: layer.config.cellSize,
-      fill: cell.fg,
+      fontSize:   cell.fontSize ?? layer.config.cellSize,
+      fill:       cell.fg,
       fontWeight: 'bold',
     });
 

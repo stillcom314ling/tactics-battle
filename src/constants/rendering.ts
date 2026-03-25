@@ -53,45 +53,45 @@ export const FOREGROUND_ALPHA  = 0.3;
 /** PixiJS app backgroundColor — very dark blue-black. */
 export const APP_BG_COLOR = 0x0a0a0c;
 
-// ── Tile color palettes — watercolour pastel ──────────────────────────────────
-// Very light, washed-out tints on a near-black background.
+// ── Tile color palettes — dark walls, neon actors ────────────────────────────
+// Walls and floors recede into darkness; actors and effects pop with vivid neon.
 
-/** Wall sub-cell colours: pale blue-grey, very desaturated. */
-export const WALL_COLORS   = [0xc8dde8, 0xd4e4f0, 0xbdd0dc, 0xcad8e4] as const;
-/** Floor sub-cell colours: dimmer than walls so they recede. */
-export const FLOOR_COLORS  = [0x7a8ea0, 0x8898aa, 0x728494] as const;
+/** Wall sub-cell colours: very dark blue-grey, structural and dim. */
+export const WALL_COLORS   = [0x1e2a38, 0x18222e, 0x1a2433, 0x1c2636] as const;
+/** Floor sub-cell colours: near-black, barely visible texture. */
+export const FLOOR_COLORS  = [0x0d1520, 0x0f1825, 0x111b29] as const;
 export const BG_FAR_COLORS = [0x1a1a2e, 0x16213e, 0x0f1626] as const;
 export const BG_MID_COLORS = [0x222244, 0x1a1a3a, 0x2a2a44] as const;
-export const FG_COLORS     = [0x8899aa, 0x99aabb, 0x778899] as const;
+export const FG_COLORS     = [0x2a3a4a, 0x2e3e50, 0x253545] as const;
 
-// ── Element colours — pastel tints (targeting highlights and action menu) ─────
+// ── Element colours — vivid neon (targeting highlights and action menu) ───────
 
 export const ELEMENT_COLORS: Record<string, number> = {
-  fire:      0xffaaaa,
-  lightning: 0xffffaa,
-  ice:       0xaaddff,
-  poison:    0xaaffaa,
-  arcane:    0xddaaff,
-  none:      0xeeeeff,
+  fire:      0xff5500,
+  lightning: 0xffee00,
+  ice:       0x44ccff,
+  poison:    0x88ff44,
+  arcane:    0xcc44ff,
+  none:      0xaabbcc,
 } as const;
 
-// ── Status effect glyph tint colours — watercolour pastel ────────────────────
+// ── Status effect glyph tint colours — neon ──────────────────────────────────
 
 export const STATUS_COLORS: Record<string, number> = {
-  burning:  0xffccaa,
-  shocked:  0xffffcc,
-  slowed:   0xccddff,
-  poisoned: 0xccffcc,
-  wet:      0xaaddff,
-  stunned:  0xffccff,
+  burning:  0xff5500,
+  shocked:  0xffff00,
+  slowed:   0x44aaff,
+  poisoned: 0x66ff44,
+  wet:      0x00ccff,
+  stunned:  0xff44ff,
 } as const;
 
 // ── HP-based color thresholds ─────────────────────────────────────────────────
 
 /** HP ratio below which the actor glyph starts blending toward LOW_HP_COLOR. */
 export const HP_DIM_THRESHOLD = 0.6;
-/** Color blended into actor glyph when HP is low — soft dusty rose. */
-export const LOW_HP_COLOR = 0xffaaaa;
+/** Color blended into actor glyph when HP is low — vivid red. */
+export const LOW_HP_COLOR = 0xff2244;
 /** Max blend factor toward LOW_HP_COLOR at 0 HP. */
 export const LOW_HP_MAX_BLEND = 0.55;
 
