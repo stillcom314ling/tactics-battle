@@ -19,9 +19,16 @@ import { ASCII_FONT_FAMILY } from '../constants/rendering';
 
 export interface AsciiCell {
   char: string;
-  fg: number;       // hex color e.g. 0xffffff
-  bg?: number;      // optional background tint
-  alpha?: number;   // 0–1, defaults to 1
+  fg: number;        // hex color e.g. 0xffffff
+  bg?: number;       // optional background tint
+  alpha?: number;    // 0–1, defaults to 1
+  /**
+   * Override font size for this cell only.
+   * Useful for making a "hero" character larger than surrounding detail chars
+   * (e.g. actor centre glyph at 16px inside an 8px sub-cell grid).
+   * Defaults to layer.config.cellSize when omitted.
+   */
+  fontSize?: number;
 }
 
 export interface LayerConfig {
@@ -32,6 +39,13 @@ export interface LayerConfig {
   rows: number;
   /** Character size in pixels */
   cellSize: number;
+  /**
+   * Logical game-cell size in pixels. Used by getLayerScreenOffset() so
+   * UI code that converts game tile coords to screen coords gets the right
+   * value even when the render grid is subdivided (e.g. 3×3 sub-cells).
+   * Defaults to cellSize when omitted.
+   */
+  gameCellSize?: number;
   /** Base alpha for the whole layer */
   alpha: number;
   /** Color tint applied to all chars (atmospheric depth simulation) */
@@ -113,8 +127,8 @@ export class ParallaxAsciiRenderer {
 
     const style = new TextStyle({
       fontFamily: this.defaultStyle.fontFamily,
-      fontSize: layer.config.cellSize,
-      fill: cell.fg,
+      fontSize:   cell.fontSize ?? layer.config.cellSize,
+      fill:       cell.fg,
       fontWeight: 'bold',
     });
 
@@ -192,7 +206,10 @@ export class ParallaxAsciiRenderer {
     return {
       x:        layer.container.x,
       y:        layer.container.y,
-      cellSize: layer.config.cellSize,
+      // Return the logical game-cell size so UI code that maps game tile
+      // coords → screen pixels gets the correct value even when the render
+      // grid uses smaller sub-cells (e.g. 3×3 subdivision of each tile).
+      cellSize: layer.config.gameCellSize ?? layer.config.cellSize,
     };
   }
 }

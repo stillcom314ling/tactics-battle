@@ -18,6 +18,42 @@ import { GeneratedMap } from './MapGenerator';
 import { getRangeTiles, getSpellTiles } from './SpellSystem';
 import { elementColor } from '../utils/colors';
 import { getActorAt } from '../combat/CombatSystem';
+import { makeActorPattern } from '../constants/patterns';
+
+// ─── SUB-CELL HELPERS ────────────────────────────────────────────────────────
+
+/**
+ * Write a 3×3 actor pattern into the gameplay layer at game-tile (col, row).
+ * Mirrors the helper in RenderSystem — duplicated here to avoid circular deps.
+ */
+function setActorPattern(
+  renderer: ParallaxAsciiRenderer,
+  col: number, row: number,
+  char: string, fg: number, alpha = 1.0,
+): void {
+  const pat = makeActorPattern(char, fg);
+  for (let dy = 0; dy < 3; dy++) {
+    for (let dx = 0; dx < 3; dx++) {
+      const cell = pat[dy][dx];
+      renderer.setCell(
+        'gameplay', col * 3 + dx, row * 3 + dy,
+        cell ? { ...cell, alpha: (cell.alpha ?? 1) * alpha } : null,
+      );
+    }
+  }
+}
+
+/**
+ * Highlight a single floor tile by overwriting only its centre sub-cell.
+ * Terrain surround chars remain untouched, giving a subtle indicator.
+ */
+function setFloorHighlight(
+  renderer: ParallaxAsciiRenderer,
+  col: number, row: number,
+  char: string, fg: number, alpha: number,
+): void {
+  renderer.setCell('gameplay', col * 3 + 1, row * 3 + 1, { char, fg, alpha });
+}
 
 export type TargetingMode = 'free' | 'targeting';
 
@@ -165,9 +201,9 @@ export class TargetingController {
       const actor = getActorAt(this.world, c, r, 'enemy');
       if (actor !== null) {
         const rend = this.world.getComponent<Renderable>(actor, 'renderable')!;
-        this.renderer.setCell('gameplay', c, r, { char: rend.char, fg: color, alpha: 0.9 });
+        setActorPattern(this.renderer, c, r, rend.char, color, 0.9);
       } else {
-        this.renderer.setCell('gameplay', c, r, { char: '·', fg: color, alpha: 0.55 });
+        setFloorHighlight(this.renderer, c, r, '·', color, 0.65);
       }
     }
   }
@@ -196,9 +232,9 @@ export class TargetingController {
       const actor = getActorAt(this.world, c, r, 'enemy');
       if (actor !== null) {
         const rend = this.world.getComponent<Renderable>(actor, 'renderable')!;
-        this.renderer.setCell('gameplay', c, r, { char: rend.char, fg: color, alpha: 1.0 });
+        setActorPattern(this.renderer, c, r, rend.char, color, 1.0);
       } else {
-        this.renderer.setCell('gameplay', c, r, { char: '*', fg: color, alpha: 0.85 });
+        setFloorHighlight(this.renderer, c, r, '*', color, 0.90);
       }
     }
   }
@@ -212,9 +248,9 @@ export class TargetingController {
         const actor = getActorAt(this.world, c, r, 'enemy');
         if (actor !== null) {
           const rend = this.world.getComponent<Renderable>(actor, 'renderable')!;
-          this.renderer.setCell('gameplay', c, r, { char: rend.char, fg: color, alpha: 0.9 });
+          setActorPattern(this.renderer, c, r, rend.char, color, 0.9);
         } else {
-          this.renderer.setCell('gameplay', c, r, { char: '·', fg: color, alpha: 0.55 });
+          setFloorHighlight(this.renderer, c, r, '·', color, 0.65);
         }
       } else {
         this.callbacks.restoreTerrain(c, r);
@@ -223,9 +259,7 @@ export class TargetingController {
         if (actor !== null) {
           const pos  = this.world.getComponent<Position>(actor, 'position')!;
           const rend = this.world.getComponent<Renderable>(actor, 'renderable')!;
-          this.renderer.setCell('gameplay', pos.col, pos.row, {
-            char: rend.char, fg: rend.fg, alpha: rend.alpha ?? 1.0,
-          });
+          setActorPattern(this.renderer, pos.col, pos.row, rend.char, rend.fg, rend.alpha ?? 1.0);
         }
       }
     }
