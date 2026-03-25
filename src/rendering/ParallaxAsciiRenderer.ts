@@ -32,6 +32,13 @@ export interface LayerConfig {
   rows: number;
   /** Character size in pixels */
   cellSize: number;
+  /**
+   * Logical game-cell size in pixels. Used by getLayerScreenOffset() so
+   * UI code that converts game tile coords to screen coords gets the right
+   * value even when the render grid is subdivided (e.g. 3×3 sub-cells).
+   * Defaults to cellSize when omitted.
+   */
+  gameCellSize?: number;
   /** Base alpha for the whole layer */
   alpha: number;
   /** Color tint applied to all chars (atmospheric depth simulation) */
@@ -192,7 +199,10 @@ export class ParallaxAsciiRenderer {
     return {
       x:        layer.container.x,
       y:        layer.container.y,
-      cellSize: layer.config.cellSize,
+      // Return the logical game-cell size so UI code that maps game tile
+      // coords → screen pixels gets the correct value even when the render
+      // grid uses smaller sub-cells (e.g. 3×3 subdivision of each tile).
+      cellSize: layer.config.gameCellSize ?? layer.config.cellSize,
     };
   }
 }

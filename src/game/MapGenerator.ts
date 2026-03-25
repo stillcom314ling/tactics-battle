@@ -18,7 +18,7 @@ import { AsciiCell } from '../rendering/ParallaxAsciiRenderer';
 import { makeDefaultPlayerAbilities } from './SpellSystem';
 import {
   MAP_W, MAP_H, DUNGEON_OPTIONS,
-  FLOOR_CHARS, WALL_CHARS, BG_FAR_CHARS, BG_MID_CHARS, FG_CHARS,
+  BG_FAR_CHARS, BG_MID_CHARS, FG_CHARS,
   ENEMY_COUNT_MIN, ENEMY_COUNT_VARIANCE,
 } from '../constants/map';
 import {
@@ -26,19 +26,32 @@ import {
   BG_LAYER_SCALE, FG_LAYER_SCALE,
 } from '../constants/rendering';
 import {
+  makeWallPattern, makeFloorPattern,
+  WALL_STYLES, FLOOR_STYLES,
+} from '../constants/patterns';
+import {
   PLAYER_HP_MAX, PLAYER_MOVE_RANGE, PLAYER_ATTACK_POWER, PLAYER_DEFENSE, PLAYER_ATTACK_RANGE,
 } from '../constants/combat';
 import { pick, weightedPick, shuffleInPlace, randomInt } from '../utils/random';
 import { ENEMY_TYPES, EnemyTypeConfig } from '../constants/enemies';
 
 export interface GeneratedMap {
+  /**
+   * Flat render grid for the gameplay layer.
+   * Dimensions: (height × 3) rows × (width × 3) cols.
+   * Each game tile at (col, row) occupies render cells
+   * (col*3 .. col*3+2, row*3 .. row*3+2).
+   */
   gameplay:   (AsciiCell | null)[][];
   bgFar:      (AsciiCell | null)[][];
   bgMid:      (AsciiCell | null)[][];
   foreground: (AsciiCell | null)[][];
   width:      number;
   height:     number;
+  /** Whether each game tile is walkable. [gameRow][gameCol]. */
   walkable:   boolean[][];
+  /** Whether each game tile is a wall. [gameRow][gameCol]. Inverse of walkable. */
+  wallMap:    boolean[][];
 }
 
 function spawnEnemy(world: World, pos: { col: number; row: number }, cfg: EnemyTypeConfig) {
@@ -73,13 +86,30 @@ export function generateMap(width: number = MAP_W, height: number = MAP_H): Gene
     if (y >= 0 && y < height && x >= 0 && x < width) wallMap[y][x] = wall === 1;
   });
 
-  // Gameplay layer
-  const gameplay: (AsciiCell | null)[][] = wallMap.map(row =>
-    row.map(isWall => isWall
-      ? { char: pick(WALL_CHARS),  fg: pick(WALL_COLORS),  alpha: 0.9 }
-      : { char: pick(FLOOR_CHARS), fg: pick(FLOOR_COLORS), alpha: 0.7 },
-    )
+  // Gameplay layer — 3×3 sub-cell grid (renderHeight × renderWidth)
+  // Each game tile (col, row) maps to render cells (col*3..col*3+2, row*3..row*3+2).
+  const renderH = height * 3;
+  const renderW = width  * 3;
+  const gameplay: (AsciiCell | null)[][] = Array.from({ length: renderH }, () =>
+    new Array(renderW).fill(null),
   );
+
+  for (let row = 0; row < height; row++) {
+    for (let col = 0; col < width; col++) {
+      const isWall = wallMap[row][col];
+      const fg     = isWall ? pick(WALL_COLORS) : pick(FLOOR_COLORS);
+      const styleIndex = Math.floor(Math.random() * (isWall ? WALL_STYLES.length : FLOOR_STYLES.length));
+      const pattern = isWall
+        ? makeWallPattern(fg, styleIndex)
+        : makeFloorPattern(fg, styleIndex);
+
+      for (let dy = 0; dy < 3; dy++) {
+        for (let dx = 0; dx < 3; dx++) {
+          gameplay[row * 3 + dy][col * 3 + dx] = pattern[dy][dx];
+        }
+      }
+    }
+  }
 
   // Background layers (larger than gameplay for parallax coverage)
   const bgW = Math.ceil(width  * BG_LAYER_SCALE);
@@ -111,7 +141,7 @@ export function generateMap(width: number = MAP_W, height: number = MAP_H): Gene
 
   const walkable: boolean[][] = wallMap.map(row => row.map(isWall => !isWall));
 
-  return { gameplay, bgFar, bgMid, foreground, width, height, walkable };
+  return { gameplay, bgFar, bgMid, foreground, width, height, walkable, wallMap };
 }
 
 // ─── WORLD POPULATION ────────────────────────────────────────────────────────
@@ -126,15 +156,22 @@ export function populateWorld(
 ): { playerId: number; floorPositions: { col: number; row: number }[] } {
   const floorPositions: { col: number; row: number }[] = [];
 
-  // Terrain entities
+  // Terrain entities — use wallMap (game-tile grid) instead of render grid chars
   for (let r = 0; r < map.height; r++) {
     for (let c = 0; c < map.width; c++) {
-      const cell = map.gameplay[r][c];
-      if (!cell) continue;
-      const isWall = (WALL_CHARS as readonly string[]).includes(cell.char);
+      const isWall = map.wallMap[r][c];
+      // Use the centre sub-cell of the 3×3 pattern as the representative char/colour
+      const centreCell = map.gameplay[r * 3 + 1]?.[c * 3 + 1];
+      if (!centreCell && isWall) continue; // degenerate tile, skip
+
       const id = world.createEntity();
       world.addComponent(id, { type: 'position', col: c, row: r, layer: 'gameplay' } as Position);
-      world.addComponent(id, { type: 'renderable', char: cell.char, fg: cell.fg, alpha: cell.alpha } as Renderable);
+      world.addComponent(id, {
+        type:  'renderable',
+        char:  centreCell?.char  ?? (isWall ? '#' : '.'),
+        fg:    centreCell?.fg    ?? 0xccddee,
+        alpha: centreCell?.alpha ?? 0.8,
+      } as Renderable);
       world.addComponent(id, {
         type:        'terrain',
         walkable:    !isWall,
@@ -151,7 +188,7 @@ export function populateWorld(
   const playerPos = floorPositions.pop()!;
   const playerId  = world.createEntity();
   world.addComponent(playerId, { type: 'position',  col: playerPos.col, row: playerPos.row, layer: 'gameplay' } as Position);
-  world.addComponent(playerId, { type: 'renderable', char: '@', fg: 0x44eeff } as Renderable);
+  world.addComponent(playerId, { type: 'renderable', char: '@', fg: 0xccffee } as Renderable);
   world.addComponent(playerId, { type: 'health',    current: PLAYER_HP_MAX, max: PLAYER_HP_MAX } as Health);
   world.addComponent(playerId, { type: 'faction',   team: 'player' } as Faction);
   world.addComponent(playerId, { type: 'status',    effects: new Map() } as StatusEffect);

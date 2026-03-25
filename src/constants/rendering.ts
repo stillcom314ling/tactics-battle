@@ -12,8 +12,18 @@
 
 // ── Cell / grid ───────────────────────────────────────────────────────────────
 
-/** Pixel size of one ASCII cell on the gameplay layer. */
+/**
+ * Logical size of one game tile in pixels.
+ * Used for camera math, screenToTile conversions, and UI positioning.
+ */
 export const CELL_SIZE = 24;
+
+/**
+ * Physical render cell size for the gameplay layer.
+ * Each game tile is drawn as a 3×3 block of sub-cells, so the render cell
+ * is 1/3 of CELL_SIZE (3 × 8 = 24 pixels per game tile on screen).
+ */
+export const RENDER_CELL_SIZE = 8;
 
 // ── Parallax layer depths ─────────────────────────────────────────────────────
 
@@ -43,42 +53,45 @@ export const FOREGROUND_ALPHA  = 0.3;
 /** PixiJS app backgroundColor — very dark blue-black. */
 export const APP_BG_COLOR = 0x0a0a0c;
 
-// ── Tile color palettes ───────────────────────────────────────────────────────
+// ── Tile color palettes — watercolour pastel ──────────────────────────────────
+// Very light, washed-out tints on a near-black background.
 
-export const WALL_COLORS   = [0x445566, 0x334455, 0x3a4a5a, 0x2d3d4d] as const;
-export const FLOOR_COLORS  = [0x556677, 0x667788, 0x5a6a7a] as const;
+/** Wall sub-cell colours: pale blue-grey, very desaturated. */
+export const WALL_COLORS   = [0xc8dde8, 0xd4e4f0, 0xbdd0dc, 0xcad8e4] as const;
+/** Floor sub-cell colours: dimmer than walls so they recede. */
+export const FLOOR_COLORS  = [0x7a8ea0, 0x8898aa, 0x728494] as const;
 export const BG_FAR_COLORS = [0x1a1a2e, 0x16213e, 0x0f1626] as const;
 export const BG_MID_COLORS = [0x222244, 0x1a1a3a, 0x2a2a44] as const;
 export const FG_COLORS     = [0x8899aa, 0x99aabb, 0x778899] as const;
 
-// ── Element colours (used for targeting highlights and action menu) ───────────
+// ── Element colours — pastel tints (targeting highlights and action menu) ─────
 
 export const ELEMENT_COLORS: Record<string, number> = {
-  fire:      0xff5500,
-  lightning: 0xffee00,
-  ice:       0x44ccff,
-  poison:    0x88ff44,
-  arcane:    0xcc44ff,
-  none:      0xffffff,
+  fire:      0xffaaaa,
+  lightning: 0xffffaa,
+  ice:       0xaaddff,
+  poison:    0xaaffaa,
+  arcane:    0xddaaff,
+  none:      0xeeeeff,
 } as const;
 
-// ── Status effect glyph tint colours ─────────────────────────────────────────
+// ── Status effect glyph tint colours — watercolour pastel ────────────────────
 
 export const STATUS_COLORS: Record<string, number> = {
-  burning:  0xff5500,
-  shocked:  0xffff00,
-  slowed:   0x88ccff,
-  poisoned: 0x66ff44,
-  wet:      0x44aaff,
-  stunned:  0xffaaff,
+  burning:  0xffccaa,
+  shocked:  0xffffcc,
+  slowed:   0xccddff,
+  poisoned: 0xccffcc,
+  wet:      0xaaddff,
+  stunned:  0xffccff,
 } as const;
 
 // ── HP-based color thresholds ─────────────────────────────────────────────────
 
 /** HP ratio below which the actor glyph starts blending toward LOW_HP_COLOR. */
 export const HP_DIM_THRESHOLD = 0.6;
-/** Color blended into actor glyph when HP is low. */
-export const LOW_HP_COLOR = 0x993333;
+/** Color blended into actor glyph when HP is low — soft dusty rose. */
+export const LOW_HP_COLOR = 0xffaaaa;
 /** Max blend factor toward LOW_HP_COLOR at 0 HP. */
 export const LOW_HP_MAX_BLEND = 0.55;
 

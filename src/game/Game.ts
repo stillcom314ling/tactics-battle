@@ -24,7 +24,7 @@ import * as ROT from 'rot-js';
 import { ParallaxAsciiRenderer }  from '../rendering/ParallaxAsciiRenderer';
 import { CameraController }        from '../rendering/CameraController';
 import { HUDRenderer }             from '../rendering/HUDRenderer';
-import { drawActors, restoreTerrain } from './RenderSystem';
+import { drawActors, restoreTerrain, setActorPatternAt } from './RenderSystem';
 
 import { World, Position, Abilities, StatusEffect, EntityId } from '../core/ECS';
 import { TurnManager }             from '../core/TurnManager';
@@ -46,7 +46,7 @@ import {
   MAP_W, MAP_H,
 }                                   from '../constants/map';
 import {
-  CELL_SIZE,
+  CELL_SIZE, RENDER_CELL_SIZE,
   DEPTH_BG_FAR, DEPTH_BG_MID, DEPTH_GAMEPLAY, DEPTH_FOREGROUND,
   BG_LAYER_SCALE, FG_LAYER_SCALE,
   BG_FAR_ALPHA, BG_FAR_TINT, BG_MID_ALPHA, BG_MID_TINT, GAMEPLAY_ALPHA, FOREGROUND_ALPHA,
@@ -115,7 +115,10 @@ export class Game {
     const bgRows = Math.ceil(MAP_H * BG_LAYER_SCALE);
     this.renderer.addLayer({ id: 'bg_far',     depth: DEPTH_BG_FAR,    cols: bgCols,                     rows: bgRows,                     cellSize: CELL_SIZE, alpha: BG_FAR_ALPHA, tint: BG_FAR_TINT });
     this.renderer.addLayer({ id: 'bg_mid',     depth: DEPTH_BG_MID,    cols: bgCols,                     rows: bgRows,                     cellSize: CELL_SIZE, alpha: BG_MID_ALPHA, tint: BG_MID_TINT });
-    this.renderer.addLayer({ id: 'gameplay',   depth: DEPTH_GAMEPLAY,  cols: MAP_W,                      rows: MAP_H,                      cellSize: CELL_SIZE, alpha: GAMEPLAY_ALPHA });
+    // Gameplay layer uses 3×3 sub-cells per game tile.
+    // cellSize=RENDER_CELL_SIZE (8px) so 3 sub-cells = CELL_SIZE (24px) per game tile.
+    // gameCellSize tells getLayerScreenOffset() to return 24 for UI/HUD code.
+    this.renderer.addLayer({ id: 'gameplay', depth: DEPTH_GAMEPLAY, cols: MAP_W * 3, rows: MAP_H * 3, cellSize: RENDER_CELL_SIZE, gameCellSize: CELL_SIZE, alpha: GAMEPLAY_ALPHA });
     this.renderer.addLayer({ id: 'foreground', depth: DEPTH_FOREGROUND, cols: Math.ceil(MAP_W * FG_LAYER_SCALE), rows: Math.ceil(MAP_H * FG_LAYER_SCALE), cellSize: CELL_SIZE, alpha: FOREGROUND_ALPHA });
 
     // ── ECS world + map ────────────────────────────────────────────────────
@@ -409,9 +412,7 @@ export class Game {
     pos.col = newCol;
     pos.row = newRow;
 
-    this.renderer.setCell('gameplay', newCol, newRow, {
-      char: rend.char, fg: rend.fg, alpha: rend.alpha ?? 1.0,
-    });
+    setActorPatternAt(this.renderer, newCol, newRow, rend.char, rend.fg, rend.alpha ?? 1.0);
 
     // Keep camera centered on player
     if (entityId === this.playerId) {
