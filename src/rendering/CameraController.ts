@@ -1,10 +1,16 @@
 /**
  * CAMERA CONTROLLER
- * 
+ *
  * Handles panning via mouse drag and touch drag.
  * Supports inertia (momentum after release) for a smooth feel.
  * Outputs cameraX/cameraY that the ParallaxAsciiRenderer uses.
  */
+
+import {
+  CAMERA_FRICTION,
+  CAMERA_VELOCITY_EPSILON,
+  CAMERA_DRAG_THRESHOLD,
+} from '../constants/rendering';
 
 export interface CameraState {
   x: number;
@@ -13,21 +19,18 @@ export interface CameraState {
   velocityY: number;
 }
 
-const DRAG_THRESHOLD = 6; // pixels before we consider it a drag vs a tap/click
-
 export class CameraController {
   public state: CameraState = { x: 0, y: 0, velocityX: 0, velocityY: 0 };
   /** True if the last pointer-down moved enough to count as a drag (not a tap). */
   public hasDragged = false;
-  /** Suspend all camera input (e.g. while radial wheel is active). */
+  /** Suspend all camera input (e.g. while action menu is open). */
   public disabled = false;
 
-  private isDragging = false;
+  private isDragging    = false;
   private startPointerX = 0;
   private startPointerY = 0;
-  private lastPointerX = 0;
-  private lastPointerY = 0;
-  private friction = 0.92;
+  private lastPointerX  = 0;
+  private lastPointerY  = 0;
 
   constructor(private element: HTMLElement) {
     this.bindEvents();
@@ -35,9 +38,9 @@ export class CameraController {
 
   private bindEvents() {
     // Mouse
-    this.element.addEventListener('mousedown', (e) => this.onPointerDown(e.clientX, e.clientY));
+    this.element.addEventListener('mousedown',  (e) => this.onPointerDown(e.clientX, e.clientY));
     window.addEventListener('mousemove', (e) => this.onPointerMove(e.clientX, e.clientY));
-    window.addEventListener('mouseup', () => this.onPointerUp());
+    window.addEventListener('mouseup',   ()  => this.onPointerUp());
 
     // Touch
     this.element.addEventListener('touchstart', (e) => {
@@ -56,12 +59,12 @@ export class CameraController {
 
   private onPointerDown(x: number, y: number) {
     if (this.disabled) return;
-    this.isDragging = true;
-    this.hasDragged = false;
+    this.isDragging    = true;
+    this.hasDragged    = false;
     this.startPointerX = x;
     this.startPointerY = y;
-    this.lastPointerX = x;
-    this.lastPointerY = y;
+    this.lastPointerX  = x;
+    this.lastPointerY  = y;
     this.state.velocityX = 0;
     this.state.velocityY = 0;
   }
@@ -75,10 +78,10 @@ export class CameraController {
     // Only pan once we've moved past the drag threshold
     const totalDx = x - this.startPointerX;
     const totalDy = y - this.startPointerY;
-    if (!this.hasDragged && Math.hypot(totalDx, totalDy) < DRAG_THRESHOLD) return;
+    if (!this.hasDragged && Math.hypot(totalDx, totalDy) < CAMERA_DRAG_THRESHOLD) return;
 
     this.hasDragged = true;
-    // Move camera opposite to drag direction (drag right = camera moves left = world moves right)
+    // Drag right = world moves right = camera moves left
     this.state.x -= dx;
     this.state.y -= dy;
     this.state.velocityX = -dx;
@@ -92,19 +95,16 @@ export class CameraController {
     this.isDragging = false;
   }
 
-  /**
-   * Call once per frame. Applies inertia when not dragging.
-   */
+  /** Call once per frame. Applies inertia when not dragging. */
   update() {
     if (!this.isDragging) {
       this.state.x += this.state.velocityX;
       this.state.y += this.state.velocityY;
-      this.state.velocityX *= this.friction;
-      this.state.velocityY *= this.friction;
+      this.state.velocityX *= CAMERA_FRICTION;
+      this.state.velocityY *= CAMERA_FRICTION;
 
-      // Stop tiny movements
-      if (Math.abs(this.state.velocityX) < 0.1) this.state.velocityX = 0;
-      if (Math.abs(this.state.velocityY) < 0.1) this.state.velocityY = 0;
+      if (Math.abs(this.state.velocityX) < CAMERA_VELOCITY_EPSILON) this.state.velocityX = 0;
+      if (Math.abs(this.state.velocityY) < CAMERA_VELOCITY_EPSILON) this.state.velocityY = 0;
     }
   }
 }

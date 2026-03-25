@@ -1,0 +1,34 @@
+/**
+ * BASIC STRATEGY — Goblin / Swarmer
+ *
+ * Behaviour: rush the player.
+ *   - If adjacent (Chebyshev ≤ 1): melee attack.
+ *   - Otherwise (and not slowed): pathfind one step toward player.
+ */
+
+import { EntityId, Position, StatusEffect } from '../../core/ECS';
+import { EnemyTurnContext } from '../AISystem';
+
+export function executeBasicTurn(enemyId: EntityId, ctx: EnemyTurnContext): void {
+  const ePos   = ctx.world.getComponent<Position>(enemyId, 'position')!;
+  const status = ctx.world.getComponent<StatusEffect>(enemyId, 'status');
+  const slowed = status?.effects.has('slowed') ?? false;
+
+  const dx = Math.abs(ctx.playerPos.col - ePos.col);
+  const dy = Math.abs(ctx.playerPos.row - ePos.row);
+
+  if (dx <= 1 && dy <= 1) {
+    ctx.resolveMelee(enemyId, ctx.playerId);
+    return;
+  }
+
+  if (!slowed) {
+    const path = ctx.findPath(ePos.col, ePos.row, ctx.playerPos.col, ctx.playerPos.row, enemyId);
+    if (path.length >= 2) {
+      const [nc, nr] = path[1];
+      if (nc !== ctx.playerPos.col || nr !== ctx.playerPos.row) {
+        ctx.moveEntity(enemyId, nc, nr);
+      }
+    }
+  }
+}
