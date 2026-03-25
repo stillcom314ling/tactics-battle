@@ -62,6 +62,11 @@ export function makePoisonCloud(): Ability {
   };
 }
 
+/** Returns the default set of player abilities for a new game / floor reset. */
+export function makeDefaultPlayerAbilities(): Ability[] {
+  return [makeFlameBolt(), makeArcLightning(), makeFrostShard(), makePoisonCloud()];
+}
+
 // ─── TILE GEOMETRY ───────────────────────────────────────────────────────────
 
 /** All tiles hit by a spell given caster + target position. */

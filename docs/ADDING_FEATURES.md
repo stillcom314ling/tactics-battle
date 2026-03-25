@@ -24,26 +24,24 @@ export function makeChainLightning(): Ability {
     chargesMax: 1,
   };
 }
+
+// 2. Add it to makeDefaultPlayerAbilities() in the same file
+export function makeDefaultPlayerAbilities(): Ability[] {
+  return [makeFlameBolt(), makeArcLightning(), makeFrostShard(), makePoisonCloud(), makeChainLightning()];
+}
 ```
 
-```typescript
-// 2. Register it in MapGenerator.ts → populateWorld() → player abilities list
-world.addComponent(playerId, {
-  type: 'abilities',
-  list: [makeFlameBolt(), makeArcLightning(), makeFrostShard(), makePoisonCloud(), makeChainLightning()],
-} as Abilities);
-```
-
-That's it. The ActionMenu, targeting, and spell resolution all pick it up automatically.
+`MapGenerator.ts` calls `makeDefaultPlayerAbilities()` — spell list stays entirely inside `SpellSystem.ts`.
+The ActionMenu, targeting, and spell resolution all pick it up automatically.
 
 ---
 
 ## 2. Add a new enemy type
 
-**Files to touch:** `src/game/MapGenerator.ts` (ENEMY_TYPES array) and optionally a new strategy file.
+**Files to touch:** `src/constants/enemies.ts` (ENEMY_TYPES array) and optionally a new strategy file.
 
 ```typescript
-// In ENEMY_TYPES array in MapGenerator.ts:
+// In ENEMY_TYPES array in src/constants/enemies.ts:
 { char: 'M', name: 'Mage', color: 0xcc44ff,
   hpMin: 12, hpMax: 18, attack: 8, defense: 0, moveRange: 2,
   strategy: 'basic',   // use existing or add a new one

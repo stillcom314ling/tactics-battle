@@ -15,7 +15,7 @@ import {
   Movement, Combat, Abilities, Label, AI,
 } from '../core/ECS';
 import { AsciiCell } from '../rendering/ParallaxAsciiRenderer';
-import { makeFlameBolt, makeArcLightning, makeFrostShard, makePoisonCloud } from './SpellSystem';
+import { makeDefaultPlayerAbilities } from './SpellSystem';
 import {
   MAP_W, MAP_H, DUNGEON_OPTIONS,
   FLOOR_CHARS, WALL_CHARS, BG_FAR_CHARS, BG_MID_CHARS, FG_CHARS,
@@ -29,6 +29,7 @@ import {
   PLAYER_HP_MAX, PLAYER_MOVE_RANGE, PLAYER_ATTACK_POWER, PLAYER_DEFENSE, PLAYER_ATTACK_RANGE,
 } from '../constants/combat';
 import { pick, weightedPick, shuffleInPlace, randomInt } from '../utils/random';
+import { ENEMY_TYPES, EnemyTypeConfig } from '../constants/enemies';
 
 export interface GeneratedMap {
   gameplay:   (AsciiCell | null)[][];
@@ -39,41 +40,6 @@ export interface GeneratedMap {
   height:     number;
   walkable:   boolean[][];
 }
-
-// ─── ENEMY TYPE CONFIG ────────────────────────────────────────────────────────
-
-interface EnemyTypeConfig {
-  char:      string;
-  name:      string;
-  color:     number;
-  hpMin:     number;
-  hpMax:     number;
-  attack:    number;
-  defense:   number;
-  moveRange: number;
-  strategy:  AI['strategy'];
-  weight:    number;       // relative spawn probability
-  groupSize?: number;      // if > 1, always spawns this many together
-}
-
-const ENEMY_TYPES: EnemyTypeConfig[] = [
-  // Goblin — basic rushdown, low HP
-  { char: 'g', name: 'Goblin',  color: 0xff5544,
-    hpMin: 18, hpMax: 26,  attack: 6,  defense: 1, moveRange: 2,
-    strategy: 'basic', weight: 3 },
-  // Archer — stays at range, shoots; fragile
-  { char: 'a', name: 'Archer',  color: 0xffdd44,
-    hpMin: 8,  hpMax: 12,  attack: 5,  defense: 0, moveRange: 3,
-    strategy: 'ranged', weight: 2 },
-  // Brute — massive HP, moves every other turn
-  { char: 'B', name: 'Brute',   color: 0xcc2211,
-    hpMin: 60, hpMax: 75,  attack: 13, defense: 4, moveRange: 2,
-    strategy: 'brute', weight: 1 },
-  // Swarmer — very weak, always spawns in clusters
-  { char: 'z', name: 'Swarmer', color: 0xaa9988,
-    hpMin: 8,  hpMax: 14,  attack: 3,  defense: 0, moveRange: 3,
-    strategy: 'swarm', weight: 3, groupSize: 3 },
-];
 
 function spawnEnemy(world: World, pos: { col: number; row: number }, cfg: EnemyTypeConfig) {
   const hp = randomInt(cfg.hpMin, cfg.hpMax);
@@ -198,7 +164,7 @@ export function populateWorld(
   } as Combat);
   world.addComponent(playerId, {
     type: 'abilities',
-    list: [makeFlameBolt(), makeArcLightning(), makeFrostShard(), makePoisonCloud()],
+    list: makeDefaultPlayerAbilities(),
   } as Abilities);
   world.addComponent(playerId, { type: 'label', name: 'Hero' } as Label);
 
