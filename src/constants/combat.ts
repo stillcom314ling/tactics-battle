@@ -9,12 +9,18 @@
 // Mirrors STATUS_DURATIONS in ECS.ts — ECS.ts imports from here so there is
 // one canonical source.
 
-export const STATUS_DURATION_BURNING  = 3;
-export const STATUS_DURATION_POISONED = 4;
-export const STATUS_DURATION_SLOWED   = 2;
-export const STATUS_DURATION_STUNNED  = 1;
-export const STATUS_DURATION_SHOCKED  = 1;
-export const STATUS_DURATION_WET      = 3;
+export const STATUS_DURATION_BURNING       = 3;
+export const STATUS_DURATION_POISONED      = 4;
+export const STATUS_DURATION_SLOWED        = 2;
+export const STATUS_DURATION_STUNNED       = 1;
+export const STATUS_DURATION_SHOCKED       = 1;
+export const STATUS_DURATION_WET           = 3;
+// ── New status effects for ability sets ──────────────────────────────────────
+export const STATUS_DURATION_INVINCIBLE    = 2;  // Star Power: skip all damage
+export const STATUS_DURATION_EMPOWERED     = 3;  // Pillar of Frost: +5 spell dmg
+export const STATUS_DURATION_KILLING_MACHINE = 1; // next Obliterate/Frost Strike 2×
+export const STATUS_DURATION_RIME_PROC     = 1;  // next Howling Blast is free
+export const STATUS_DURATION_HASTED        = 1;  // Double Jump: free move after cast
 
 // ── Passive damage from status effects (per turn_start tick) ─────────────────
 

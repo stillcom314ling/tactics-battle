@@ -9,7 +9,7 @@
  * Extracted from Game.ts (was: private enemyMelee / enemyRangedAttack).
  */
 
-import { World, EntityId, Health, Combat, Position, Faction } from '../core/ECS';
+import { World, EntityId, Health, Combat, Position, Faction, StatusEffect } from '../core/ECS';
 import { GeneratedMap } from '../game/MapGenerator';
 import { MELEE_VARIANCE } from '../constants/combat';
 
@@ -87,6 +87,13 @@ export function resolveMelee(
   const defHealth = world.getComponent<Health>(defenderId, 'health');
   if (!defHealth) return;
 
+  // Invincible: Star Power blocks all damage
+  const defStatus = world.getComponent<StatusEffect>(defenderId, 'status');
+  if (defStatus?.effects.has('invincible')) {
+    callbacks.addMessage('★ Star Power! You are invincible!');
+    return;
+  }
+
   const defense = defCombat?.defense ?? 0;
   const dmg     = Math.max(1, atk.attackPower + Math.floor(Math.random() * MELEE_VARIANCE) - defense);
   defHealth.current -= dmg;
@@ -126,6 +133,13 @@ export function resolveRangedAttack(
   if (!tPos || !tHealth) return false;
 
   if (!hasLineOfSight(aPos, tPos, map)) return false;
+
+  // Invincible: Star Power blocks all damage
+  const tStatus = world.getComponent<StatusEffect>(targetId, 'status');
+  if (tStatus?.effects.has('invincible')) {
+    callbacks.addMessage('★ Star Power! You are invincible!');
+    return true; // shot "connected" but dealt no damage
+  }
 
   const def = world.getComponent<Combat>(targetId, 'combat')?.defense ?? 0;
   const dmg = Math.max(1, damage - def);

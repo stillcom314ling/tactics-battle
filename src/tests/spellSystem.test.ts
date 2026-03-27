@@ -175,7 +175,7 @@ describe('resolveSpell', () => {
     const { world, casterId, targetId } = makeWorld();
     const spell = makeFlameBolt();
     const addMessage = vi.fn();
-    resolveSpell(world, casterId, spell, 3, 0, makeMap(), addMessage);
+    resolveSpell(world, casterId, spell, 3, 0, makeMap(), { addMessage });
     const hp = world.getComponent<Health>(targetId, 'health')!;
     expect(hp.current).toBe(20 - spell.damage);
   });
@@ -183,7 +183,7 @@ describe('resolveSpell', () => {
   it('applies status effects', () => {
     const { world, casterId, targetId } = makeWorld();
     const spell = makeFlameBolt();
-    resolveSpell(world, casterId, spell, 3, 0, makeMap(), vi.fn());
+    resolveSpell(world, casterId, spell, 3, 0, makeMap(), { addMessage: vi.fn() });
     const status = world.getComponent<StatusEffect>(targetId, 'status')!;
     expect(status.effects.has('burning')).toBe(true);
   });
@@ -191,14 +191,14 @@ describe('resolveSpell', () => {
   it('removes entity when HP drops to 0', () => {
     const { world, casterId, targetId } = makeWorld();
     world.getComponent<Health>(targetId, 'health')!.current = 1;
-    resolveSpell(world, casterId, makeFlameBolt(), 3, 0, makeMap(), vi.fn());
+    resolveSpell(world, casterId, makeFlameBolt(), 3, 0, makeMap(), { addMessage: vi.fn() });
     expect(world.hasComponent(targetId, 'health')).toBe(false);
   });
 
   it('reports miss when no target on tile', () => {
     const { world, casterId } = makeWorld();
     const addMessage = vi.fn();
-    resolveSpell(world, casterId, makeFlameBolt(), 8, 8, makeMap(), addMessage);
+    resolveSpell(world, casterId, makeFlameBolt(), 8, 8, makeMap(), { addMessage });
     expect(addMessage).toHaveBeenCalledWith(expect.stringContaining('hits nothing'));
   });
 
@@ -206,7 +206,7 @@ describe('resolveSpell', () => {
     const { world, casterId } = makeWorld();
     const spell = makeFlameBolt();
     const before = spell.charges;
-    resolveSpell(world, casterId, spell, 3, 0, makeMap(), vi.fn());
+    resolveSpell(world, casterId, spell, 3, 0, makeMap(), { addMessage: vi.fn() });
     expect(spell.charges).toBe(before - 1);
   });
 
@@ -214,7 +214,7 @@ describe('resolveSpell', () => {
     const { world, casterId } = makeWorld();
     const spell = makeFlameBolt();
     spell.charges = 0;
-    resolveSpell(world, casterId, spell, 3, 0, makeMap(), vi.fn());
+    resolveSpell(world, casterId, spell, 3, 0, makeMap(), { addMessage: vi.fn() });
     expect(spell.charges).toBe(0);
   });
 });

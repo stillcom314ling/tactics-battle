@@ -65,12 +65,17 @@ export const ELEMENT_COLORS: Record<string, number> = {
 // ── Status effect glyph tint colours ─────────────────────────────────────────
 
 export const STATUS_COLORS: Record<string, number> = {
-  burning:  0xff5500,
-  shocked:  0xffff00,
-  slowed:   0x88ccff,
-  poisoned: 0x66ff44,
-  wet:      0x44aaff,
-  stunned:  0xffaaff,
+  burning:         0xff5500,
+  shocked:         0xffff00,
+  slowed:          0x88ccff,
+  poisoned:        0x66ff44,
+  wet:             0x44aaff,
+  stunned:         0xffaaff,
+  invincible:      0xffdd00,   // gold — Star Power
+  empowered:       0xcc44ff,   // purple — Pillar of Frost
+  killing_machine: 0xff4444,   // red — Killing Machine proc
+  rime_proc:       0x44eeff,   // light cyan — Rime proc
+  hasted:          0xaaffaa,   // green — Double Jump
 } as const;
 
 // ── HP-based color thresholds ─────────────────────────────────────────────────

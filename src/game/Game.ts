@@ -26,16 +26,16 @@ import { CameraController }        from '../rendering/CameraController';
 import { HUDRenderer }             from '../rendering/HUDRenderer';
 import { drawActors, restoreTerrain } from './RenderSystem';
 
-import { World, Position, Abilities, StatusEffect, EntityId } from '../core/ECS';
+import { World, Position, Abilities, Ability, Passives, StatusEffect, EntityId, PassiveContext } from '../core/ECS';
 import { TurnManager }             from '../core/TurnManager';
 import { processInteractions }     from '../core/InteractionSystem';
 
-import { TooltipOverlay }          from '../ui/TooltipOverlay';
-import { DPad }                    from '../ui/DPad';
-import { ActionMenu, ActiveItem }  from '../ui/ActionMenu';
+import { TooltipOverlay }                    from '../ui/TooltipOverlay';
+import { DPad }                              from '../ui/DPad';
+import { ActionMenu, ActiveItem, PassiveItem } from '../ui/ActionMenu';
 
 import { generateMap, populateWorld, GeneratedMap } from './MapGenerator';
-import { resolveSpell }            from './SpellSystem';
+import { resolveSpell, SpellCallbacks }  from './SpellSystem';
 import { TargetingController }     from './TargetingController';
 import { InputHandler }            from './InputHandler';
 
@@ -87,6 +87,12 @@ export class Game {
 
   /** Debounce flag: prevents an action-menu tap from also firing a map-tap. */
   private menuJustOpened = false;
+
+  /**
+   * Double Jump passive: when true, the next player movement step does not
+   * end the turn (the spell cast already didn't end it).
+   */
+  private extraMoveAfterCast = false;
 
   constructor(private container: HTMLElement) {}
 
@@ -201,7 +207,7 @@ export class Game {
       const sw = this.app.screen.width, sh = this.app.screen.height;
       this.menuJustOpened = true;
       requestAnimationFrame(() => requestAnimationFrame(() => { this.menuJustOpened = false; }));
-      this.actionMenu.open(this.buildActiveItems(), sw, sh, () => {
+      this.actionMenu.open(this.buildActiveItems(), this.buildPassiveItems(), sw, sh, () => {
         this.camera.disabled = false;
       });
       this.camera.disabled = true;
@@ -247,8 +253,76 @@ export class Game {
       chargesMax: a.chargesMax,
       color:      elementColor(a.element),
       tooltip:    `DMG ${a.damage}  RNG ${a.range}${a.effects.length ? '  ' + a.effects.join(', ') : ''}`,
-      action:     () => this.targetingCtrl.enter(a),
+      action:     () => {
+        // Self-pattern spells (ground_pound, star_power, pillar_of_frost) cast immediately
+        if (a.pattern === 'self') {
+          const pos = this.world.getComponent<Position>(this.playerId, 'position')!;
+          this.castSpell(a, pos.col, pos.row);
+        } else {
+          this.targetingCtrl.enter(a);
+        }
+      },
     }));
+  }
+
+  private buildPassiveItems(): PassiveItem[] {
+    const passives = this.world.getComponent<Passives>(this.playerId, 'passives');
+    if (!passives) return [];
+    const triggerLabel: Record<string, string> = {
+      on_kill:          'On kill',
+      on_hit_taken:     'When hit',
+      on_status_apply:  'On status apply',
+      on_cast:          'On cast',
+      passive:          'Always',
+    };
+    return passives.list.map(p => ({
+      id:          p.id,
+      name:        p.name,
+      description: p.description,
+      triggerLabel: triggerLabel[p.trigger] ?? p.trigger,
+    }));
+  }
+
+  /**
+   * Resolve a spell cast and handle all post-cast effects:
+   * passive triggers, free-move (Double Jump), alerts, redraw.
+   */
+  private castSpell(ability: Ability, targetCol: number, targetRow: number): void {
+    const playerPos = this.world.getComponent<Position>(this.playerId, 'position')!;
+    const addMsg    = (msg: string) => this.hudRenderer.addMessage(msg);
+
+    const spellCallbacks: SpellCallbacks = {
+      addMessage: addMsg,
+      onKill: (killedId) => {
+        this.firePassives('on_kill', { killedId, addMessage: addMsg });
+      },
+      onStatusApplied: (_targetId, effect) => {
+        this.firePassives('on_status_apply', { statusApplied: effect, addMessage: addMsg });
+      },
+      onKnockback: (entityId, toCol, toRow) => {
+        this.moveEntity(entityId, toCol, toRow);
+      },
+      onTeleportCaster: (toCol, toRow) => {
+        this.moveEntity(this.playerId, toCol, toRow);
+      },
+    };
+
+    resolveSpell(this.world, this.playerId, ability, targetCol, targetRow, this.mapData, spellCallbacks);
+    this.alertEnemies(playerPos.col, playerPos.row, ALERT_RADIUS_SPELL);
+    drawActors(this.world, this.renderer);
+
+    // Fire on_cast passives BEFORE ending the turn
+    this.firePassives('on_cast', { abilityId: ability.id, addMessage: addMsg });
+
+    // Check if Double Jump activated (passive applied 'hasted' to player)
+    const ps = this.world.getComponent<StatusEffect>(this.playerId, 'status');
+    if (ps?.effects.has('hasted')) {
+      ps.effects.delete('hasted');
+      this.extraMoveAfterCast = true;
+      // Don't end the turn — player gets one free movement step
+    } else {
+      this.endPlayerTurn();
+    }
   }
 
   // ─── INPUT HANDLERS ───────────────────────────────────────────────────────
@@ -280,17 +354,11 @@ export class Game {
 
       if (result === 'cast') {
         const pending = this.targetingCtrl.getPendingTarget();
-        const tc = pending ? pending[0] : col;
-        const tr = pending ? pending[1] : row;
+        const tc      = pending ? pending[0] : col;
+        const tr      = pending ? pending[1] : row;
         const ability = this.targetingCtrl.state.selectedAbility!;
         this.targetingCtrl.clearAfterCast();
-        resolveSpell(
-          this.world, this.playerId, ability, tc, tr, this.mapData,
-          (msg) => this.hudRenderer.addMessage(msg),
-        );
-        this.alertEnemies(playerPos.col, playerPos.row, ALERT_RADIUS_SPELL);
-        drawActors(this.world, this.renderer);
-        this.endPlayerTurn();
+        this.castSpell(ability, tc, tr);
       }
       return;
     }
@@ -317,17 +385,20 @@ export class Game {
     if (!this.mapData.walkable[row]?.[col]) return;
     const path = this.findPath(playerPos.col, playerPos.row, col, row, this.playerId);
     if (path.length < 2) return;
+    this.extraMoveAfterCast = false;
     this.moveEntity(this.playerId, path[1][0], path[1][1]);
     this.endPlayerTurn();
   }
 
   private movePlayerInDirection(dx: number, dy: number) {
-    if (this.turnManager.isGameOver || !this.turnManager.isPlayerTurn) return;
+    if (this.turnManager.isGameOver) return;
+    if (!this.turnManager.isPlayerTurn && !this.extraMoveAfterCast) return;
     if (this.targetingCtrl.isTargeting) return;
 
     const playerStatus = this.world.getComponent<StatusEffect>(this.playerId, 'status');
     if (playerStatus?.effects.has('stunned')) {
       this.hudRenderer.addMessage('You are stunned and lose your turn!');
+      this.extraMoveAfterCast = false;
       this.endPlayerTurn();
       return;
     }
@@ -339,6 +410,7 @@ export class Game {
     if (!this.mapData.walkable[nr]?.[nc]) return;
     if (getActorAt(this.world, nc, nr, 'enemy') !== null) return; // no bump-attack
     this.tooltip.hide();
+    this.extraMoveAfterCast = false;
     this.moveEntity(this.playerId, nc, nr);
     this.endPlayerTurn();
   }
@@ -346,6 +418,7 @@ export class Game {
   private waitTurn() {
     if (this.turnManager.isGameOver || !this.turnManager.isPlayerTurn) return;
     if (this.targetingCtrl.isTargeting) return;
+    this.extraMoveAfterCast = false;
     this.hudRenderer.addMessage('You wait.');
     this.endPlayerTurn();
   }
@@ -423,6 +496,14 @@ export class Game {
   }
 
   // ─── HELPERS ──────────────────────────────────────────────────────────────
+
+  private firePassives(trigger: string, ctx: PassiveContext): void {
+    const passives = this.world.getComponent<Passives>(this.playerId, 'passives');
+    if (!passives) return;
+    for (const p of passives.list) {
+      if (p.trigger === trigger) p.effect(this.world, this.playerId, ctx);
+    }
+  }
 
   private alertEnemies(sourceCol: number, sourceRow: number, radius: number) {
     const anyNew = alertEnemiesNear(this.world, sourceCol, sourceRow, radius);

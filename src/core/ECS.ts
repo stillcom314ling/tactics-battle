@@ -16,6 +16,11 @@ import {
   STATUS_DURATION_STUNNED,
   STATUS_DURATION_SHOCKED,
   STATUS_DURATION_WET,
+  STATUS_DURATION_INVINCIBLE,
+  STATUS_DURATION_EMPOWERED,
+  STATUS_DURATION_KILLING_MACHINE,
+  STATUS_DURATION_RIME_PROC,
+  STATUS_DURATION_HASTED,
 } from '../constants/combat';
 
 export type EntityId = number;
@@ -67,12 +72,17 @@ export interface StatusEffect extends Component {
  * Values live in constants/combat.ts so they can be tuned in one place.
  */
 export const STATUS_DURATIONS: Record<string, number> = {
-  burning:  STATUS_DURATION_BURNING,
-  poisoned: STATUS_DURATION_POISONED,
-  slowed:   STATUS_DURATION_SLOWED,
-  stunned:  STATUS_DURATION_STUNNED,
-  shocked:  STATUS_DURATION_SHOCKED,
-  wet:      STATUS_DURATION_WET,
+  burning:         STATUS_DURATION_BURNING,
+  poisoned:        STATUS_DURATION_POISONED,
+  slowed:          STATUS_DURATION_SLOWED,
+  stunned:         STATUS_DURATION_STUNNED,
+  shocked:         STATUS_DURATION_SHOCKED,
+  wet:             STATUS_DURATION_WET,
+  invincible:      STATUS_DURATION_INVINCIBLE,
+  empowered:       STATUS_DURATION_EMPOWERED,
+  killing_machine: STATUS_DURATION_KILLING_MACHINE,
+  rime_proc:       STATUS_DURATION_RIME_PROC,
+  hasted:          STATUS_DURATION_HASTED,
 };
 
 /** Apply a status effect, keeping the longer duration if already present. */
@@ -125,15 +135,47 @@ export interface Ability {
   pattern: 'single' | 'line' | 'aoe' | 'self';
   aoeRadius?: number;
   damage: number;
-  effects: string[];   // status labels to apply on hit
+  effects: string[];   // status labels to apply on hit (enemies)
   charges: number;     // remaining uses this level
   chargesMax: number;  // total uses per level
+  // ── Special ability flags ─────────────────────────────────────────────────
+  /** If true, apply effects[] to the caster instead of targets (star_power, pillar_of_frost). */
+  appliesEffectsToSelf?: boolean;
+  /** If true, push each hit enemy 1 tile away from caster (ground_pound). */
+  knockbackOnHit?: boolean;
+  /** If true, teleport caster to target tile before dealing damage (super_jump). */
+  teleportCaster?: boolean;
+  /** Chance to apply a status to the CASTER on a successful hit. */
+  casterProcOnHit?: Array<{ status: string; chance: number }>;
+}
+
+// --- PASSIVE (a trigger-based character modifier) ---
+export interface PassiveContext {
+  killedId?:      EntityId;
+  sourceId?:      EntityId;
+  statusApplied?: string;   // effect name, for on_status_apply
+  abilityId?:     string;   // ability just cast, for on_cast
+  addMessage?:    (msg: string) => void;
+}
+
+export interface Passive {
+  id:          string;
+  name:        string;
+  description: string;
+  trigger:     'on_kill' | 'on_hit_taken' | 'on_status_apply' | 'on_cast' | 'passive';
+  effect:      (world: World, playerId: EntityId, ctx: PassiveContext) => void;
 }
 
 // --- ABILITIES (entity's spell list) ---
 export interface Abilities extends Component {
   type: 'abilities';
   list: Ability[];
+}
+
+// --- PASSIVES (entity's passive list) ---
+export interface Passives extends Component {
+  type: 'passives';
+  list: Passive[];
 }
 
 // --- AI (enemy behaviour strategy) ---

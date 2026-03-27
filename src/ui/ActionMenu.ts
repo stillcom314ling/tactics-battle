@@ -29,7 +29,12 @@ export interface ActiveItem {
   action:     () => void;
 }
 
-const PLACEHOLDER_PASSIVES = ['Speed Boost', 'Tough Skin', 'Mana Regen', 'Arcane Ward'];
+export interface PassiveItem {
+  id:           string;
+  name:         string;
+  description:  string;
+  triggerLabel: string;  // e.g. "On kill", "On cast", "Always"
+}
 
 const ELEMENT_ICONS: Record<string, string> = {
   fire:      '🔥',
@@ -104,7 +109,7 @@ export class ActionMenu {
 
   get isOpen() { return this._isOpen; }
 
-  open(actives: ActiveItem[], screenW: number, screenH: number, onClose?: () => void) {
+  open(actives: ActiveItem[], passives: PassiveItem[], screenW: number, screenH: number, onClose?: () => void) {
     this._isOpen   = true;
     this.scrollY   = 0;
     this.onCloseCb = onClose ?? null;
@@ -117,7 +122,7 @@ export class ActionMenu {
     const sectionLabelH  = 26;
     const totalContentH  =
       sectionLabelH + Math.max(1, actives.length) * MENU_ROW_H + MENU_PAD +
-      sectionLabelH + PLACEHOLDER_PASSIVES.length * MENU_ROW_H + MENU_PAD;
+      sectionLabelH + Math.max(1, passives.length) * MENU_ROW_H + MENU_PAD;
 
     this.contentH = totalContentH;
     this.visibleH = Math.min(totalContentH, maxPanelH - MENU_HEADER_H);
@@ -179,9 +184,16 @@ export class ActionMenu {
 
     this.sectionLabel('PASSIVES', curY, this.scrollContent);
     curY += sectionLabelH;
-    for (const name of PLACEHOLDER_PASSIVES) {
-      this.buildPassiveRow(name, curY, contentGfx);
+    if (passives.length === 0) {
+      const empty = this.makeText('  No passives', 13, 0x445566);
+      empty.x = MENU_PAD; empty.y = curY + 12;
+      this.scrollContent.addChild(empty);
       curY += MENU_ROW_H;
+    } else {
+      for (const item of passives) {
+        this.buildPassiveRow(item, curY, contentGfx);
+        curY += MENU_ROW_H;
+      }
     }
 
     if (this.contentH > this.visibleH) this.drawScrollBar(panelH);
@@ -320,23 +332,27 @@ export class ActionMenu {
     }
   }
 
-  private buildPassiveRow(name: string, y: number, gfx: Graphics) {
+  private buildPassiveRow(item: PassiveItem, y: number, gfx: Graphics) {
     gfx.roundRect(MENU_PAD, y, MENU_PANEL_W - MENU_PAD * 2, MENU_ROW_H - 4, 5)
-      .fill({ color: 0x080f18, alpha: 0.7 })
-      .stroke({ color: 0x1a2233, alpha: 0.5, width: 1 });
+      .fill({ color: 0x0a1520, alpha: 0.8 })
+      .stroke({ color: 0x1e3355, alpha: 0.6, width: 1 });
 
-    const cb = this.makeText('[ ]', 14, 0x2a3a50);
-    cb.x = MENU_PAD + 8; cb.y = y + 14;
-    this.scrollContent.addChild(cb);
+    const icon = this.makeText('◆', 12, 0x3366aa);
+    icon.x = MENU_PAD + 8; icon.y = y + 8;
+    this.scrollContent.addChild(icon);
 
-    const lbl = this.makeText(name, 13, 0x3a4a66);
-    lbl.x = MENU_PAD + 44; lbl.y = y + 14;
+    const lbl = this.makeText(item.name, 13, 0x99bbdd, true);
+    lbl.x = MENU_PAD + 26; lbl.y = y + 7;
     this.scrollContent.addChild(lbl);
 
-    const tag = this.makeText('coming soon', 9, 0x223344);
-    tag.anchor.set(1, 0.5);
-    tag.x = MENU_PANEL_W - MENU_PAD - 4; tag.y = y + MENU_ROW_H / 2 - 2;
-    this.scrollContent.addChild(tag);
+    const desc = this.makeText(item.description, 10, 0x4a6a88);
+    desc.x = MENU_PAD + 26; desc.y = y + 26;
+    this.scrollContent.addChild(desc);
+
+    const trig = this.makeText(item.triggerLabel, 9, 0x2a4a66);
+    trig.anchor.set(1, 0.5);
+    trig.x = MENU_PANEL_W - MENU_PAD - 4; trig.y = y + MENU_ROW_H / 2 - 2;
+    this.scrollContent.addChild(trig);
   }
 
   private sectionLabel(text: string, y: number, parent: Container) {

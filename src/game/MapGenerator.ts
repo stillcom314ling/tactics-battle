@@ -12,10 +12,22 @@
 import * as ROT from 'rot-js';
 import {
   World, Position, Renderable, Terrain, Health, Faction, StatusEffect,
-  Movement, Combat, Abilities, Label, AI,
+  Movement, Combat, Abilities, Passives, Label, AI,
 } from '../core/ECS';
 import { AsciiCell } from '../rendering/ParallaxAsciiRenderer';
-import { makeDefaultPlayerAbilities } from './SpellSystem';
+import {
+  makeDefaultPlayerAbilities,
+  makeMarioSet, makeMarioPassives,
+  makeFrostDKSet, makeFrostDKPassives,
+} from './SpellSystem';
+
+/**
+ * Which ability set the player starts with.
+ * 'default'  — original four starter spells (flame bolt, arc lightning, etc.)
+ * 'mario'    — The Plumber: Ground Pound, Fire Flower, Star Power, Super Jump
+ * 'frost_dk' — The Frost Death Knight: Obliterate, Frost Strike, Howling Blast, Pillar of Frost
+ */
+export const PLAYER_SET: 'default' | 'mario' | 'frost_dk' = 'frost_dk';
 import {
   MAP_W, MAP_H, DUNGEON_OPTIONS,
   FLOOR_CHARS, WALL_CHARS, BG_FAR_CHARS, BG_MID_CHARS, FG_CHARS,
@@ -162,10 +174,22 @@ export function populateWorld(
     defense:      PLAYER_DEFENSE,
     attackRange:  PLAYER_ATTACK_RANGE,
   } as Combat);
-  world.addComponent(playerId, {
-    type: 'abilities',
-    list: makeDefaultPlayerAbilities(),
-  } as Abilities);
+  const abilityList =
+    PLAYER_SET === 'mario'    ? makeMarioSet()    :
+    PLAYER_SET === 'frost_dk' ? makeFrostDKSet()  :
+    makeDefaultPlayerAbilities();
+
+  world.addComponent(playerId, { type: 'abilities', list: abilityList } as Abilities);
+
+  const passiveList =
+    PLAYER_SET === 'mario'    ? makeMarioPassives()    :
+    PLAYER_SET === 'frost_dk' ? makeFrostDKPassives()  :
+    [];
+
+  if (passiveList.length > 0) {
+    world.addComponent(playerId, { type: 'passives', list: passiveList } as Passives);
+  }
+
   world.addComponent(playerId, { type: 'label', name: 'Hero' } as Label);
 
   // Enemy entities — ENEMY_COUNT_MIN + rand(0, ENEMY_COUNT_VARIANCE)
