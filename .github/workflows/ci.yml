@@ -11,15 +11,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-node@v4
         with:
-          dotnet-version: 8.0.x
+          node-version: 20
+          cache: npm
 
-      - name: Install wasm-tools workload
-        run: dotnet workload install wasm-tools-net8
+      - run: npm ci
 
-      - name: Restore
-        run: dotnet restore RaylibGame/RaylibGame.csproj
-
-      - name: Build
-        run: dotnet build RaylibGame/RaylibGame.csproj -c Release --no-restore
+      - run: npm run build

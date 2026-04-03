@@ -22,60 +22,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-node@v4
         with:
-          dotnet-version: 8.0.x
+          node-version: 20
+          cache: npm
 
-      - name: Install wasm-tools workload
-        run: dotnet workload install wasm-tools-net8
+      - run: npm ci
 
-      - name: Restore
-        run: dotnet restore RaylibGame/RaylibGame.csproj
-
-      - name: Publish (browser-wasm)
-        run: dotnet publish RaylibGame/RaylibGame.csproj -c Release -o publish/
-
-      - name: Show publish output
-        run: find publish/ -type f | sort
-
-      - name: Create index.html bootstrap
-        run: |
-          # Find where dotnet.js lives in the publish output
-          if [ -f "publish/_framework/dotnet.js" ]; then
-            DOTNET_JS="./_framework/dotnet.js"
-          elif [ -f "publish/dotnet.js" ]; then
-            DOTNET_JS="./dotnet.js"
-          else
-            echo "ERROR: dotnet.js not found anywhere in publish/"
-            find publish/ -type f | sort
-            exit 1
-          fi
-          echo "Using dotnet.js at: $DOTNET_JS"
-
-          cat > publish/index.html << HTMLEOF
-          <!DOCTYPE html>
-          <html lang="en">
-          <head>
-            <meta charset="utf-8" />
-            <title>RaylibGame WASM</title>
-            <style>
-              * { margin: 0; padding: 0; box-sizing: border-box; }
-              body { background: #1a1a2e; display: flex; justify-content: center; align-items: center; height: 100vh; }
-            </style>
-          </head>
-          <body>
-            <canvas id="canvas" width="800" height="450" oncontextmenu="event.preventDefault()"></canvas>
-            <script type="module">
-              import { dotnet } from '$DOTNET_JS';
-              await dotnet.run();
-            </script>
-          </body>
-          </html>
-          HTMLEOF
+      - run: npm run build
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: publish/
+          path: dist/
 
       - uses: actions/deploy-pages@v4
         id: deployment
