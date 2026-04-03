@@ -38,9 +38,17 @@ jobs:
       - name: Show publish output
         run: find publish/ -type f | sort
 
+      - name: Locate AppBundle
+        run: |
+          if [ -d "publish/AppBundle" ]; then
+            echo "PAGES_DIR=publish/AppBundle" >> $GITHUB_ENV
+          else
+            echo "PAGES_DIR=publish" >> $GITHUB_ENV
+          fi
+
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: publish/AppBundle
+          path: ${{ env.PAGES_DIR }}
 
       - uses: actions/deploy-pages@v4
         id: deployment
