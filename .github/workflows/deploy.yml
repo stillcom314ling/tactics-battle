@@ -26,21 +26,18 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      - name: Install wasm-tools workload
+        run: dotnet workload install wasm-tools
+
       - name: Restore
-        run: dotnet restore RaylibGame/RaylibGame.csproj -r linux-x64
+        run: dotnet restore RaylibGame/RaylibGame.csproj
 
-      - name: Build
-        run: dotnet build RaylibGame/RaylibGame.csproj -c Release -r linux-x64 --no-restore
-
-      - name: Publish (self-contained Linux x64)
-        run: dotnet publish RaylibGame/RaylibGame.csproj -c Release -r linux-x64 --self-contained -o publish/ --no-restore
-
-      - name: Copy landing page
-        run: cp docs/index.html publish/index.html
+      - name: Publish (browser-wasm)
+        run: dotnet publish RaylibGame/RaylibGame.csproj -c Release -o publish/
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: publish/
+          path: publish/AppBundle
 
       - uses: actions/deploy-pages@v4
         id: deployment
