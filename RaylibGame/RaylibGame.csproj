@@ -10,7 +10,6 @@
     <UseAppHost>false</UseAppHost>
     <WasmBuildNative>true</WasmBuildNative>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <WasmMainJSPath>main.js</WasmMainJSPath>
   </PropertyGroup>
 
   <ItemGroup>
