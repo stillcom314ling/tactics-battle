@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Raylib-cs Example</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #1a1a2e;
+      color: #e0e0e0;
+      font-family: 'Courier New', monospace;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 2rem;
+    }
+    h1 { font-size: 2rem; color: #c0392b; margin-bottom: 0.5rem; }
+    .subtitle { color: #888; margin-bottom: 2rem; font-size: 0.95rem; }
+    .card {
+      background: #16213e;
+      border: 1px solid #0f3460;
+      border-radius: 8px;
+      padding: 2rem;
+      max-width: 600px;
+      width: 100%;
+      margin-bottom: 1.5rem;
+    }
+    .card h2 { color: #e94560; margin-bottom: 1rem; font-size: 1.1rem; }
+    .card p, .card li { color: #ccc; line-height: 1.7; margin-bottom: 0.5rem; }
+    .card ul { padding-left: 1.5rem; }
+    .badge {
+      display: inline-block;
+      background: #0f3460;
+      color: #e94560;
+      padding: 0.2rem 0.6rem;
+      border-radius: 4px;
+      font-size: 0.8rem;
+      margin: 0.2rem;
+    }
+    .note { font-size: 0.85rem; color: #666; margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>Raylib-cs Example</h1>
+  <p class="subtitle">A minimal C# Raylib project built via GitHub Actions</p>
+
+  <div class="card">
+    <h2>About</h2>
+    <p>This is a minimal example demonstrating a <strong>C# + Raylib-cs</strong> project
+    compiled and deployed through GitHub Actions.</p>
+    <p>The game opens an 800x450 window with a bouncing ball and text overlay —
+    built with <span class="badge">.NET 8</span> <span class="badge">Raylib-cs 7</span>.</p>
+  </div>
+
+  <div class="card">
+    <h2>Download &amp; Run (Linux x64)</h2>
+    <ul>
+      <li>Download the <code>RaylibGame</code> binary from the latest
+        <a href="../../actions" style="color:#e94560">GitHub Actions run</a>
+        (artifacts section).</li>
+      <li>Make it executable: <code>chmod +x RaylibGame</code></li>
+      <li>Run it: <code>./RaylibGame</code></li>
+    </ul>
+    <p class="note">Requires a display (X11 or Wayland). Built as a self-contained binary — no .NET runtime needed.</p>
+  </div>
+
+  <div class="card">
+    <h2>Stack</h2>
+    <ul>
+      <li><strong>Language:</strong> C# / .NET 8</li>
+      <li><strong>Graphics:</strong> Raylib-cs 7.0.0 (bindings for raylib)</li>
+      <li><strong>CI/CD:</strong> GitHub Actions — dotnet restore → build → publish</li>
+      <li><strong>Deploy:</strong> GitHub Pages (this page)</li>
+    </ul>
+  </div>
+</body>
+</html>

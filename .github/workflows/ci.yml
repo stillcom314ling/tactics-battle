@@ -6,18 +6,17 @@ on:
     branches: [main, 'claude/**']
 
 jobs:
-  test:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-dotnet@v4
         with:
-          node-version: 20
-          cache: npm
+          dotnet-version: 8.0.x
 
-      - run: npm ci
+      - name: Restore
+        run: dotnet restore RaylibGame/RaylibGame.csproj
 
-      - run: npm test
-
-      - run: npm run build
+      - name: Build
+        run: dotnet build RaylibGame/RaylibGame.csproj -c Release --no-restore

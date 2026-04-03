@@ -1,4 +1,4 @@
-name: Deploy to GitHub Pages
+name: Build and Deploy
 
 on:
   push:
@@ -22,18 +22,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-dotnet@v4
         with:
-          node-version: 20
-          cache: npm
+          dotnet-version: 8.0.x
 
-      - run: npm ci
+      - name: Restore
+        run: dotnet restore RaylibGame/RaylibGame.csproj
 
-      - run: npm run build
+      - name: Build
+        run: dotnet build RaylibGame/RaylibGame.csproj -c Release --no-restore
+
+      - name: Publish (self-contained Linux x64)
+        run: dotnet publish RaylibGame/RaylibGame.csproj -c Release -r linux-x64 --self-contained -o publish/ --no-restore
+
+      - name: Copy landing page
+        run: cp docs/index.html publish/index.html
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: publish/
 
       - uses: actions/deploy-pages@v4
         id: deployment
