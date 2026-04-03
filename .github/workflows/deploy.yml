@@ -27,7 +27,7 @@ jobs:
           dotnet-version: 8.0.x
 
       - name: Install wasm-tools workload
-        run: dotnet workload install wasm-tools
+        run: dotnet workload install wasm-tools-net8
 
       - name: Restore
         run: dotnet restore RaylibGame/RaylibGame.csproj
