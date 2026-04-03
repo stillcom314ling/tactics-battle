@@ -26,6 +26,9 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      - name: List available workloads
+        run: dotnet workload search
+
       - name: Install wasm-tools workload
         run: dotnet workload install wasm-tools-net8
 
@@ -36,7 +39,16 @@ jobs:
         run: dotnet publish RaylibGame/RaylibGame.csproj -c Release -o publish/
 
       - name: Show publish output
-        run: find publish/ -type f | sort
+        if: always()
+        run: find publish/ -type f | sort || echo "(publish dir empty or missing)"
+
+      - name: Upload publish tree for inspection
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: publish-output
+          path: publish/
+          if-no-files-found: warn
 
       - name: Locate web root (directory containing index.html)
         run: |
