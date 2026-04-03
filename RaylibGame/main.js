@@ -1,14 +1,30 @@
-import { dotnet } from './_framework/dotnet.js'
+import { dotnet } from './dotnet.js'
 
-// Raylib WASM looks for a <canvas id="canvas"> element
+// Create canvas for Raylib before initialising the runtime
 const canvas = document.createElement('canvas');
 canvas.id = 'canvas';
 canvas.width = 800;
 canvas.height = 450;
 canvas.oncontextmenu = e => e.preventDefault();
-document.body.style.cssText = 'margin:0;background:#1a1a2e;display:flex;justify-content:center;align-items:center;height:100vh';
+Object.assign(document.body.style, {
+    margin: '0', background: '#1a1a2e',
+    display: 'flex', justifyContent: 'center',
+    alignItems: 'center', height: '100vh'
+});
 document.body.appendChild(canvas);
 
-await dotnet
+const { getAssemblyExports, getConfig } = await dotnet
     .withDiagnosticTracing(false)
-    .run();
+    .create();
+
+const config = getConfig();
+const exports = await getAssemblyExports(config.mainAssemblyName);
+
+// Main() sets up the Raylib window; DrawFrame() is called each browser frame
+exports.RaylibGame.Program.Main();
+
+function loop() {
+    exports.RaylibGame.Program.DrawFrame();
+    requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);

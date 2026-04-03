@@ -1,47 +1,46 @@
-using Raylib_cs;
 using System.Numerics;
+using System.Runtime.InteropServices.JavaScript;
+using Raylib_cs;
 
 namespace RaylibGame;
 
-class Program
+public partial class Program
 {
-    static void Main()
+    private static Vector2 _ballPos;
+    private static Vector2 _ballSpeed = new(200f, 150f);
+    private const float BallRadius = 20f;
+    private const int ScreenWidth = 800;
+    private const int ScreenHeight = 450;
+
+    public static void Main()
     {
-        const int screenWidth = 800;
-        const int screenHeight = 450;
-
-        Raylib.InitWindow(screenWidth, screenHeight, "Hello Raylib-cs");
+        Raylib.InitWindow(ScreenWidth, ScreenHeight, "Hello Raylib WASM");
         Raylib.SetTargetFPS(60);
+        _ballPos = new Vector2(ScreenWidth / 2f, ScreenHeight / 2f);
+    }
 
-        // Bouncing ball state
-        var ballPos = new Vector2(screenWidth / 2f, screenHeight / 2f);
-        var ballSpeed = new Vector2(200f, 150f);
-        const float ballRadius = 20f;
+    // Called every frame from requestAnimationFrame in main.js
+    [JSExport]
+    public static void DrawFrame()
+    {
+        float dt = Raylib.GetFrameTime();
 
-        while (!Raylib.WindowShouldClose())
-        {
-            float dt = Raylib.GetFrameTime();
+        // Update ball
+        _ballPos += _ballSpeed * dt;
+        if (_ballPos.X <= BallRadius || _ballPos.X >= ScreenWidth - BallRadius)
+            _ballSpeed.X *= -1;
+        if (_ballPos.Y <= BallRadius || _ballPos.Y >= ScreenHeight - BallRadius)
+            _ballSpeed.Y *= -1;
 
-            // Update ball
-            ballPos += ballSpeed * dt;
-            if (ballPos.X <= ballRadius || ballPos.X >= screenWidth - ballRadius)
-                ballSpeed.X *= -1;
-            if (ballPos.Y <= ballRadius || ballPos.Y >= screenHeight - ballRadius)
-                ballSpeed.Y *= -1;
+        // Draw
+        Raylib.BeginDrawing();
+        Raylib.ClearBackground(Color.RayWhite);
 
-            // Draw
-            Raylib.BeginDrawing();
-            Raylib.ClearBackground(Color.RayWhite);
+        Raylib.DrawCircleV(_ballPos, BallRadius, Color.Maroon);
+        Raylib.DrawText("Hello World!", 270, 200, 40, Color.DarkGray);
+        Raylib.DrawText("C# + Raylib-cs running in WebAssembly", 130, 260, 18, Color.Gray);
+        Raylib.DrawFPS(10, 10);
 
-            Raylib.DrawCircleV(ballPos, ballRadius, Color.Maroon);
-
-            Raylib.DrawText("Hello from Raylib-cs!", 190, 180, 30, Color.DarkGray);
-            Raylib.DrawText($"Frame: {Raylib.GetTime():F1}s", 10, 10, 20, Color.Gray);
-            Raylib.DrawText("Built with .NET 8 + Raylib-cs via GitHub Actions", 10, screenHeight - 30, 16, Color.Gray);
-
-            Raylib.EndDrawing();
-        }
-
-        Raylib.CloseWindow();
+        Raylib.EndDrawing();
     }
 }
