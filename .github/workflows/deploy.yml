@@ -38,13 +38,17 @@ jobs:
       - name: Show publish output
         run: find publish/ -type f | sort
 
-      - name: Locate AppBundle
+      - name: Locate web root (directory containing index.html)
         run: |
-          if [ -d "publish/AppBundle" ]; then
-            echo "PAGES_DIR=publish/AppBundle" >> $GITHUB_ENV
-          else
-            echo "PAGES_DIR=publish" >> $GITHUB_ENV
+          INDEX=$(find publish/ -name "index.html" -print -quit)
+          if [ -z "$INDEX" ]; then
+            echo "ERROR: No index.html found under publish/"
+            exit 1
           fi
+          WEB_ROOT=$(dirname "$INDEX")
+          echo "PAGES_DIR=$WEB_ROOT" >> $GITHUB_ENV
+          echo "Deploying from: $WEB_ROOT"
+          ls -la "$WEB_ROOT"
 
       - uses: actions/upload-pages-artifact@v3
         with:
