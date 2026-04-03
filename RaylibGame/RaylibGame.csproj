@@ -16,4 +16,10 @@
     <PackageReference Include="Raylib-cs" Version="7.0.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Browser entry point — required to trigger AppBundle generation -->
+    <WasmExtraFilesToDeploy Include="main.js" />
+    <WasmExtraFilesToDeploy Include="wwwroot\index.html" TargetPath="index.html" />
+  </ItemGroup>
+
 </Project>
