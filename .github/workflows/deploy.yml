@@ -26,9 +26,6 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      - name: List available workloads
-        run: dotnet workload search
-
       - name: Install wasm-tools workload
         run: dotnet workload install wasm-tools-net8
 
@@ -39,32 +36,46 @@ jobs:
         run: dotnet publish RaylibGame/RaylibGame.csproj -c Release -o publish/
 
       - name: Show publish output
-        if: always()
-        run: find publish/ -type f | sort || echo "(publish dir empty or missing)"
+        run: find publish/ -type f | sort
 
-      - name: Upload publish tree for inspection
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: publish-output
-          path: publish/
-          if-no-files-found: warn
-
-      - name: Locate web root (directory containing index.html)
+      - name: Create index.html bootstrap
         run: |
-          INDEX=$(find publish/ -name "index.html" -print -quit)
-          if [ -z "$INDEX" ]; then
-            echo "ERROR: No index.html found under publish/"
+          # Find where dotnet.js lives in the publish output
+          if [ -f "publish/_framework/dotnet.js" ]; then
+            DOTNET_JS="./_framework/dotnet.js"
+          elif [ -f "publish/dotnet.js" ]; then
+            DOTNET_JS="./dotnet.js"
+          else
+            echo "ERROR: dotnet.js not found anywhere in publish/"
+            find publish/ -type f | sort
             exit 1
           fi
-          WEB_ROOT=$(dirname "$INDEX")
-          echo "PAGES_DIR=$WEB_ROOT" >> $GITHUB_ENV
-          echo "Deploying from: $WEB_ROOT"
-          ls -la "$WEB_ROOT"
+          echo "Using dotnet.js at: $DOTNET_JS"
+
+          cat > publish/index.html << HTMLEOF
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8" />
+            <title>RaylibGame WASM</title>
+            <style>
+              * { margin: 0; padding: 0; box-sizing: border-box; }
+              body { background: #1a1a2e; display: flex; justify-content: center; align-items: center; height: 100vh; }
+            </style>
+          </head>
+          <body>
+            <canvas id="canvas" width="800" height="450" oncontextmenu="event.preventDefault()"></canvas>
+            <script type="module">
+              import { dotnet } from '$DOTNET_JS';
+              await dotnet.run();
+            </script>
+          </body>
+          </html>
+          HTMLEOF
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: ${{ env.PAGES_DIR }}
+          path: publish/
 
       - uses: actions/deploy-pages@v4
         id: deployment
