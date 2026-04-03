@@ -35,6 +35,9 @@ jobs:
       - name: Publish (browser-wasm)
         run: dotnet publish RaylibGame/RaylibGame.csproj -c Release -o publish/
 
+      - name: Show publish output
+        run: find publish/ -type f | sort
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: publish/AppBundle
