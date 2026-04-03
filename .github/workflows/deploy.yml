@@ -27,10 +27,10 @@ jobs:
           dotnet-version: 8.0.x
 
       - name: Restore
-        run: dotnet restore RaylibGame/RaylibGame.csproj
+        run: dotnet restore RaylibGame/RaylibGame.csproj -r linux-x64
 
       - name: Build
-        run: dotnet build RaylibGame/RaylibGame.csproj -c Release --no-restore
+        run: dotnet build RaylibGame/RaylibGame.csproj -c Release -r linux-x64 --no-restore
 
       - name: Publish (self-contained Linux x64)
         run: dotnet publish RaylibGame/RaylibGame.csproj -c Release -r linux-x64 --self-contained -o publish/ --no-restore
