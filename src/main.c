@@ -1,5 +1,4 @@
 #include "raylib.h"
-#include "raygui.h"
 #include "proto.h"
 #include "menu.h"
 
@@ -174,8 +173,6 @@ int main(void)
 
     InitWindow(w, h, "Prototype Launcher");
     SetTargetFPS(60);
-
-    GuiLoadStyleDefault(); /* ensure raygui has its default theme ready */
 
     MenuInit(&menu, PROTOTYPES, PROTO_COUNT);
 
