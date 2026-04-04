@@ -1,6 +1,7 @@
 #include "balls.h"
 #include "raylib.h"
 #include <math.h>
+#include <stddef.h>
 
 #define MAX_BALLS       64
 #define MAX_TOUCHES     10
