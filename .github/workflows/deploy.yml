@@ -1,4 +1,4 @@
-name: Deploy to GitHub Pages
+name: Build and Deploy
 
 on:
   push:
@@ -22,18 +22,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: mymindstorm/setup-emsdk@v14
         with:
-          node-version: 20
-          cache: npm
+          version: 3.1.64
+          actions-cache-folder: emsdk-cache
 
-      - run: npm ci
+      - name: Download raylib WASM
+        run: |
+          wget -q https://github.com/raysan5/raylib/releases/download/5.5/raylib-5.5_webassembly.zip
+          unzip -q raylib-5.5_webassembly.zip
 
-      - run: npm run build
+      - name: Build
+        run: |
+          mkdir -p dist
+          emcc game/main.c \
+            -I raylib-5.5_webassembly/include \
+            raylib-5.5_webassembly/lib/libraylib.a \
+            -o dist/index.html \
+            -s USE_GLFW=3 \
+            -s ASYNCIFY \
+            -s TOTAL_MEMORY=67108864 \
+            -DPLATFORM_WEB \
+            --shell-file game/shell.html
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: dist/
 
       - uses: actions/deploy-pages@v4
         id: deployment
