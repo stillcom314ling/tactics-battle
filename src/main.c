@@ -1,4 +1,5 @@
 #include "raylib.h"
+#include "raygui.h"
 #include "proto.h"
 #include "menu.h"
 
@@ -7,6 +8,13 @@
 
 #ifdef PLATFORM_WEB
 #include <emscripten/emscripten.h>
+#ifndef EMSCRIPTEN_KEEPALIVE
+#define EMSCRIPTEN_KEEPALIVE
+#endif
+#endif
+
+#ifndef GIT_VERSION
+#define GIT_VERSION "dev"
 #endif
 
 /* ---------------------------------------------------------------- registry */
@@ -34,14 +42,37 @@ static Menu     menu;
 static Vector2 s_prev_touch_pos   = {-1.0f, -1.0f};
 static int     s_prev_touch_count = 0;
 
+/* set to 1 by JS on_browser_back() when the hardware/browser back is pressed */
+static int s_back_requested = 0;
+
+#ifdef PLATFORM_WEB
+/* Called from JavaScript (History API popstate) to signal a back gesture. */
+EMSCRIPTEN_KEEPALIVE
+void on_browser_back(void) { s_back_requested = 1; }
+#endif
+
+/* ---------------------------------------------------- version badge overlay */
+
+static void draw_version(void)
+{
+    int sh        = GetScreenHeight();
+    int font_size = 18;
+    const char *ver = "build: " GIT_VERSION;
+    int text_w = MeasureText(ver, font_size);
+    DrawText(ver,
+             GetScreenWidth() - text_w - 8,
+             sh - font_size - 6,
+             font_size,
+             (Color){ 160, 160, 160, 140 });
+}
+
 /* --------------------------------------------------------- back button overlay
  * Draws a floating X button in the top-right corner.
- * Returns true if the user wants to return to the menu (tap, mouse click,
- * ESC, or Android hardware back button). */
+ * Returns true if the user wants to return to the menu. */
 static bool draw_back_button(void)
 {
     int sw   = GetScreenWidth();
-    int size = sw / 9;             /* ~120 px on a 1080-wide screen */
+    int size = sw / 9;
     int pad  = size / 5;
 
     Rectangle btn = {
@@ -71,7 +102,10 @@ static bool draw_back_button(void)
 
     /* ---- input ---- */
 
-    /* keyboard / Android hardware back */
+    /* browser / Android hardware back (set by JS) */
+    if (s_back_requested) { s_back_requested = 0; return true; }
+
+    /* keyboard fallback */
     if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_BACK)) return true;
 
     /* mouse click release on button */
@@ -95,8 +129,8 @@ static void frame(void)
     float dt = GetFrameTime();
 
     if (app_state == STATE_MENU) {
-        /* reset touch tracker so the back button doesn't fire on first frame */
-        s_prev_touch_count = 0;
+        s_prev_touch_count = 0; /* reset so back button can't fire immediately */
+        s_back_requested   = 0; /* ignore back presses while in the menu */
 
         int sel = MenuUpdate(&menu);
         if (sel >= 0) {
@@ -107,6 +141,7 @@ static void frame(void)
 
         BeginDrawing();
             MenuDraw(&menu);
+            draw_version();
         EndDrawing();
 
     } else {
@@ -120,6 +155,7 @@ static void frame(void)
                 MenuInit(&menu, PROTOTYPES, PROTO_COUNT);
                 app_state = STATE_MENU;
             }
+            draw_version();
         EndDrawing();
     }
 }
@@ -138,6 +174,8 @@ int main(void)
 
     InitWindow(w, h, "Prototype Launcher");
     SetTargetFPS(60);
+
+    GuiLoadStyleDefault(); /* ensure raygui has its default theme ready */
 
     MenuInit(&menu, PROTOTYPES, PROTO_COUNT);
 

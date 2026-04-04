@@ -11,7 +11,8 @@ LDFLAGS   := $(RAYLIB)/lib/libraylib.a \
              -s TOTAL_MEMORY=67108864  \
              --shell-file src/shell.html
 
-CFLAGS    := -DPLATFORM_WEB -O2
+GIT_HASH  := $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+CFLAGS    := -DPLATFORM_WEB -O2 -DGIT_VERSION='"$(GIT_HASH)"'
 
 # Core sources (always compiled)
 CORE_SRCS := src/main.c src/menu.c src/raygui_impl.c

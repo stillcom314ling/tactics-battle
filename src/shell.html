@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>raylib</title>
+  <title>Prototype Launcher</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
@@ -19,9 +19,39 @@
 <body>
   <canvas id="canvas" oncontextmenu="event.preventDefault()"></canvas>
   <script>
+    // ----------------------------------------------------------------
+    // Emscripten Module config — must be defined before {{{ SCRIPT }}}
+    // ----------------------------------------------------------------
     var Module = {
-      canvas: (function() { return document.getElementById('canvas'); })()
+      canvas: document.getElementById('canvas'),
+
+      onRuntimeInitialized: function () {
+        // Push a dummy history entry so the browser "back" action fires
+        // popstate instead of navigating away from the page.
+        history.pushState({ game: true }, '');
+      }
     };
+
+    // ----------------------------------------------------------------
+    // Android / browser back button → call into C on_browser_back()
+    // ----------------------------------------------------------------
+    window.addEventListener('popstate', function () {
+      // Re-push so the next back press is also caught.
+      history.pushState({ game: true }, '');
+
+      // Signal our C code if the runtime is ready.
+      if (typeof Module !== 'undefined' && Module._on_browser_back) {
+        Module._on_browser_back();
+      }
+    });
+
+    // ----------------------------------------------------------------
+    // Prevent ESC from being swallowed by the browser (e.g. exiting
+    // pointer-lock or cancelling dialogs) so raylib sees it.
+    // ----------------------------------------------------------------
+    window.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') e.preventDefault();
+    }, { passive: false });
   </script>
   {{{ SCRIPT }}}
 </body>

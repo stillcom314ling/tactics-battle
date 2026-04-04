@@ -1,6 +1,6 @@
 #include "menu.h"
-#include "raygui.h"
 #include "raylib.h"
+#include "raygui.h"
 #include <string.h>
 
 /* Max characters for the semicolon-separated list string */
