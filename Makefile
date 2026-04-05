@@ -8,6 +8,7 @@ INCLUDE   := -I$(RAYLIB)/include \
 
 LDFLAGS   := $(RAYLIB)/lib/libraylib.a \
              -s USE_GLFW=3             \
+             -s ASYNCIFY               \
              -s TOTAL_MEMORY=67108864  \
              --shell-file src/shell.html
 

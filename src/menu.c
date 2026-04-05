@@ -1,171 +1,92 @@
 #include "menu.h"
 #include "raylib.h"
-#include <stddef.h>
+#include "raygui.h"
+#include <string.h>
 
-/* ----------------------------------------------------------------- layout
- * All geometry is computed from screen size so it works on any display. */
+#define LIST_BUF 2048
 
-static int layout_pad(int sw)     { return sw / 20; }
-static int layout_title_fs(int sw){ return sw / 14; }
-static int layout_body_fs(int sw) { return sw / 20; }
-static int layout_small_fs(int sw){ return sw / 28; }
-static int layout_item_h(int sh)  { return sh / 9;  }
-static int layout_item_gap(int sh){ return sh / 72; }
-
-static int layout_list_top(int sw, int sh)
+/* Build the semicolon-separated name list GuiListView expects. */
+static void build_list(const Menu *m, char *buf, int sz)
 {
-    (void)sh;
-    return layout_pad(sw) + layout_title_fs(sw) + layout_pad(sw);
+    buf[0] = '\0';
+    for (int i = 0; i < m->count; i++) {
+        if (i > 0) strncat(buf, ";", (size_t)(sz - (int)strlen(buf) - 1));
+        strncat(buf, m->prototypes[i]->name, (size_t)(sz - (int)strlen(buf) - 1));
+    }
 }
-
-static Rectangle item_rect(int i, int sw, int sh)
-{
-    int pad    = layout_pad(sw);
-    int item_h = layout_item_h(sh);
-    int gap    = layout_item_gap(sh);
-    int top    = layout_list_top(sw, sh);
-    return (Rectangle){
-        (float)pad,
-        (float)(top + i * (item_h + gap)),
-        (float)(sw - 2 * pad),
-        (float)item_h
-    };
-}
-
-static Rectangle launch_rect(int sw, int sh)
-{
-    int   pad   = layout_pad(sw);
-    float btn_w = sw * 0.6f;
-    float btn_h = (float)layout_item_h(sh);
-    return (Rectangle){
-        (sw - btn_w) / 2.0f,
-        (float)(sh - (int)btn_h - pad),
-        btn_w,
-        btn_h
-    };
-}
-
-/* ---------------------------------------------------------------- menu api */
 
 void MenuInit(Menu *m, const Prototype * const *protos, int count)
 {
-    m->prototypes   = protos;
-    m->count        = count;
-    m->active       = -1;
-    m->scroll_idx   = 0;
-    m->launched     = -1;
-    m->prev_touch   = 0;
+    m->prototypes = protos;
+    m->count      = count;
+    m->active     = (count > 0) ? 0 : -1;
+    m->scroll_idx = 0;
+    m->launched   = -1;
+    m->prev_touch = 0;
 }
 
 int MenuUpdate(Menu *m)
 {
-    int sw = GetScreenWidth();
-    int sh = GetScreenHeight();
-
-    /* --- detect a single tap / click (fires once per gesture) --- */
-    bool   pressed   = false;
-    Vector2 press_pos = {-1.0f, -1.0f};
-
-    int tc = GetTouchPointCount();
-    if (tc > 0 && m->prev_touch == 0) {
-        /* touch just started this frame */
-        pressed   = true;
-        press_pos = GetTouchPosition(0);
-    } else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-        pressed   = true;
-        press_pos = GetMousePosition();
-    }
-    m->prev_touch = tc;
-
-    /* track mouse hover for desktop highlight */
-    m->active = -1;
-    Vector2 mouse = GetMousePosition();
-    for (int i = 0; i < m->count; i++) {
-        Rectangle r = item_rect(i, sw, sh);
-        if (CheckCollisionPointRec(mouse, r)) m->active = i;
-    }
-
-    if (pressed) {
-        /* prototype items: tap to launch */
-        for (int i = 0; i < m->count; i++) {
-            if (CheckCollisionPointRec(press_pos, item_rect(i, sw, sh))) {
-                m->launched = i;
-                break;
-            }
-        }
-        /* launch button also works */
-        if (m->active >= 0 &&
-            CheckCollisionPointRec(press_pos, launch_rect(sw, sh)))
-            m->launched = m->active;
-    }
-
     int result  = m->launched;
     m->launched = -1;
     return result;
 }
 
-void MenuDraw(const Menu *m)
+void MenuDraw(Menu *m)
 {
-    ClearBackground((Color){ 15, 15, 25, 255 });
+    ClearBackground((Color){ 20, 20, 32, 255 });
 
-    int sw = GetScreenWidth();
-    int sh = GetScreenHeight();
-    int pad      = layout_pad(sw);
-    int title_fs = layout_title_fs(sw);
-    int body_fs  = layout_body_fs(sw);
-    int small_fs = layout_small_fs(sw);
-    int item_h   = layout_item_h(sh);
+    int sw  = GetScreenWidth();
+    int sh  = GetScreenHeight();
+    int pad = sw / 20;
+
+    int text_sz = sw / 22;
+    GuiSetStyle(DEFAULT, TEXT_SIZE, text_sz);
 
     /* ---- title ---- */
-    const char *title = "PROTOTYPE LAUNCHER";
-    int title_w = MeasureText(title, title_fs);
-    DrawText(title, (sw - title_w) / 2, pad, title_fs, WHITE);
+    GuiSetStyle(LABEL, TEXT_ALIGNMENT, TEXT_ALIGN_CENTER);
+    GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, ColorToInt(WHITE));
+    Rectangle title_r = { (float)pad, (float)pad,
+                          (float)(sw - 2*pad), (float)(sh/10) };
+    GuiLabel(title_r, "PROTOTYPE LAUNCHER");
 
-    /* ---- prototype items ---- */
-    Vector2 mouse = GetMousePosition();
+    float y = title_r.y + title_r.height + pad;
 
-    for (int i = 0; i < m->count; i++) {
-        Rectangle row = item_rect(i, sw, sh);
-        bool hovered  = CheckCollisionPointRec(mouse, row);
+    /* ---- list ---- */
+    char list_buf[LIST_BUF];
+    build_list(m, list_buf, LIST_BUF);
 
-        Color bg     = hovered ? (Color){ 50, 110, 230, 255 }
-                               : (Color){ 28,  28,  45, 255 };
-        Color border = hovered ? (Color){ 90, 160, 255, 255 }
-                               : (Color){ 55,  55,  80, 255 };
+    float list_h = sh * 0.40f;
+    Rectangle list_r = { (float)pad, y, (float)(sw - 2*pad), list_h };
+    GuiListView(list_r, list_buf, &m->scroll_idx, &m->active);
 
-        DrawRectangleRec(row, bg);
-        DrawRectangleLinesEx(row, 2, border);
+    y += list_h + pad;
 
-        int text_y = (int)row.y + (item_h - body_fs) / 2;
-        DrawText(m->prototypes[i]->name,
-                 (int)row.x + pad / 2, text_y, body_fs, WHITE);
-
-        if (item_h > body_fs + small_fs + 8) {
-            DrawText(m->prototypes[i]->description,
-                     (int)row.x + pad / 2,
-                     text_y + body_fs + 4,
-                     small_fs,
-                     (Color){ 180, 180, 200, 180 });
-        }
+    /* ---- description ---- */
+    GuiSetStyle(DEFAULT, TEXT_SIZE, text_sz * 3 / 4);
+    GuiSetStyle(LABEL, TEXT_ALIGNMENT, TEXT_ALIGN_LEFT);
+    float desc_h = sh * 0.18f;
+    Rectangle desc_r = { (float)pad, y, (float)(sw - 2*pad), desc_h };
+    DrawRectangleRec(desc_r, (Color){ 30, 30, 48, 255 });
+    DrawRectangleLinesEx(desc_r, 1, (Color){ 70, 70, 100, 255 });
+    if (m->active >= 0 && m->active < m->count) {
+        GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, ColorToInt(LIGHTGRAY));
+        Rectangle inner = { desc_r.x + pad/2, desc_r.y + pad/2,
+                            desc_r.width - pad, desc_r.height - pad };
+        GuiLabel(inner, m->prototypes[m->active]->description);
     }
 
-    /* ---- launch button (desktop helper, tap item directly on mobile) ---- */
-    Rectangle btn      = launch_rect(sw, sh);
-    bool      has_sel  = (m->active >= 0);
-    Color btn_bg  = has_sel ? (Color){ 50, 180,  90, 255 }
-                            : (Color){ 35,  35,  50, 255 };
-    Color btn_bdr = has_sel ? (Color){ 80, 220, 120, 255 }
-                            : (Color){ 55,  55,  70, 255 };
-    Color btn_fg  = has_sel ? WHITE : (Color){ 80, 80, 80, 255 };
+    y += desc_h + pad;
 
-    DrawRectangleRec(btn, btn_bg);
-    DrawRectangleLinesEx(btn, 2, btn_bdr);
-
-    const char *label   = has_sel ? "TAP ITEM OR LAUNCH >" : "hover / tap to select";
-    int         label_fs = small_fs;
-    int         label_w  = MeasureText(label, label_fs);
-    DrawText(label,
-             (int)btn.x + ((int)btn.width  - label_w)  / 2,
-             (int)btn.y + ((int)btn.height - label_fs) / 2,
-             label_fs, btn_fg);
+    /* ---- launch button ---- */
+    GuiSetStyle(DEFAULT, TEXT_SIZE, text_sz);
+    float btn_w = sw * 0.6f;
+    float btn_h = sh / 10.0f;
+    Rectangle btn_r = { (sw - btn_w) / 2.0f,
+                        (float)(sh - (int)btn_h - pad),
+                        btn_w, btn_h };
+    bool ok = (m->active >= 0 && m->active < m->count);
+    if (!ok) GuiSetState(STATE_DISABLED);
+    if (GuiButton(btn_r, "Launch >") && ok) m->launched = m->active;
+    if (!ok) GuiSetState(STATE_NORMAL);
 }
