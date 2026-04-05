@@ -16,7 +16,7 @@ GIT_HASH  := $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 CFLAGS    := -DPLATFORM_WEB -O2 -DGIT_VERSION='"$(GIT_HASH)"'
 
 # Core sources (always compiled)
-CORE_SRCS := src/main.c src/menu.c src/raygui_impl.c
+CORE_SRCS := src/main.c src/menu.c src/drag_disp.c src/raygui_impl.c
 
 # Auto-discover all prototype sources
 PROTO_SRCS := $(wildcard prototypes/*/*.c)

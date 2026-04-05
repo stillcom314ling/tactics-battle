@@ -23,10 +23,12 @@ void MenuInit(Menu *m, const Prototype * const *protos, int count)
     m->scroll_idx = 0;
     m->launched   = -1;
     m->prev_touch = 0;
+    DragDispInit(&m->drag, 220.0f, 40.0f);
 }
 
 int MenuUpdate(Menu *m)
 {
+    DragDispUpdate(&m->drag);
     int result  = m->launched;
     m->launched = -1;
     return result;
@@ -43,14 +45,23 @@ void MenuDraw(Menu *m)
     int text_sz = sw / 22;
     GuiSetStyle(DEFAULT, TEXT_SIZE, text_sz);
 
+    /* Scale drag influence with screen size so it feels consistent. */
+    m->drag.radius   = sw * 0.22f;
+    m->drag.strength = sw * 0.04f;
+
     /* ---- title ---- */
     GuiSetStyle(LABEL, TEXT_ALIGNMENT, TEXT_ALIGN_CENTER);
     GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, ColorToInt(WHITE));
     Rectangle title_r = { (float)pad, (float)pad,
                           (float)(sw - 2*pad), (float)(sh/10) };
+    Vector2 title_center = { title_r.x + title_r.width * 0.5f,
+                             title_r.y + title_r.height * 0.5f };
+    Vector2 title_off = DragDispOffset(&m->drag, title_center);
+    title_r.x += title_off.x;
+    title_r.y += title_off.y;
     GuiLabel(title_r, "PROTOTYPE LAUNCHER");
 
-    float y = title_r.y + title_r.height + pad;
+    float y = (float)pad + (float)(sh / 10) + (float)pad;
 
     /* ---- list ---- */
     char list_buf[LIST_BUF];
@@ -67,6 +78,12 @@ void MenuDraw(Menu *m)
     GuiSetStyle(LABEL, TEXT_ALIGNMENT, TEXT_ALIGN_LEFT);
     float desc_h = sh * 0.18f;
     Rectangle desc_r = { (float)pad, y, (float)(sw - 2*pad), desc_h };
+    Vector2 desc_center = { desc_r.x + desc_r.width * 0.5f,
+                            desc_r.y + desc_r.height * 0.5f };
+    Vector2 desc_off = DragDispOffset(&m->drag, desc_center);
+    /* Description box displaces at half strength for a subtler effect. */
+    desc_r.x += desc_off.x * 0.5f;
+    desc_r.y += desc_off.y * 0.5f;
     DrawRectangleRec(desc_r, (Color){ 30, 30, 48, 255 });
     DrawRectangleLinesEx(desc_r, 1, (Color){ 70, 70, 100, 255 });
     if (m->active >= 0 && m->active < m->count) {
@@ -85,6 +102,11 @@ void MenuDraw(Menu *m)
     Rectangle btn_r = { (sw - btn_w) / 2.0f,
                         (float)(sh - (int)btn_h - pad),
                         btn_w, btn_h };
+    Vector2 btn_center = { btn_r.x + btn_r.width * 0.5f,
+                           btn_r.y + btn_r.height * 0.5f };
+    Vector2 btn_off = DragDispOffset(&m->drag, btn_center);
+    btn_r.x += btn_off.x;
+    btn_r.y += btn_off.y;
     bool ok = (m->active >= 0 && m->active < m->count);
     if (!ok) GuiSetState(STATE_DISABLED);
     if (GuiButton(btn_r, "Launch >") && ok) m->launched = m->active;
