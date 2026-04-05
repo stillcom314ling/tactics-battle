@@ -3,6 +3,7 @@
 #include "menu.h"
 
 #include "../prototypes/balls/balls.h"
+#include "../prototypes/drag_disp/drag_disp.h"
 
 #ifdef PLATFORM_WEB
 #include <emscripten/emscripten.h>
@@ -16,6 +17,7 @@
  * To add a prototype: #include its header above, add &XxxProto below. */
 static const Prototype * const PROTOTYPES[] = {
     &BallsProto,
+    &DragDispProto,
 };
 static const int PROTO_COUNT = (int)(sizeof(PROTOTYPES) / sizeof(PROTOTYPES[0]));
 
