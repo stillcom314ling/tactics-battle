@@ -32,18 +32,14 @@ jobs:
           wget -q https://github.com/raysan5/raylib/releases/download/5.5/raylib-5.5_webassembly.zip
           unzip -q raylib-5.5_webassembly.zip
 
-      - name: Build
+      - name: Download raygui
         run: |
-          mkdir -p dist
-          emcc game/main.c \
-            -I raylib-5.5_webassembly/include \
-            raylib-5.5_webassembly/lib/libraylib.a \
-            -o dist/index.html \
-            -s USE_GLFW=3 \
-            -s ASYNCIFY \
-            -s TOTAL_MEMORY=67108864 \
-            -DPLATFORM_WEB \
-            --shell-file game/shell.html
+          mkdir -p vendor
+          wget -q -O vendor/raygui.h \
+            https://raw.githubusercontent.com/raysan5/raygui/4.0/src/raygui.h
+
+      - name: Build
+        run: make
 
       - uses: actions/upload-pages-artifact@v3
         with:
