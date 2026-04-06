@@ -23,7 +23,7 @@ static const int DC[4] = { 0,  1, 0, -1};
 /* ------------------------------------------------------------------- typedefs */
 
 typedef struct {
-    int  values[4]; /* N=0, E=1, S=2, W=3 (1–9) */
+    int  values[4]; /* N=0, E=1, S=2, W=3 (1–5) */
     int  flip_count;
     bool active;
 } Card;
@@ -109,7 +109,7 @@ static Card make_card(void)
     c.flip_count = 0;
     c.active     = true;
     for (int i = 0; i < 4; i++)
-        c.values[i] = GetRandomValue(1, 9);
+        c.values[i] = GetRandomValue(1, 5);
     return c;
 }
 
@@ -125,61 +125,24 @@ static Color card_color(int flip_count)
 
 /* ----------------------------------------------------------- flip resolution */
 
+/* Only the dropped card checks its 4 immediate neighbours.
+   Flipped cards do not chain — they just accumulate flip_count. */
 static void run_resolve(int drop_idx)
 {
-    int  queue[BOARD_SIZE];
-    int  depth_arr[BOARD_SIZE];
-    bool visited[BOARD_SIZE];
-    memset(visited,   0, sizeof(visited));
-    memset(depth_arr, 0, sizeof(depth_arr));
+    int r = drop_idx / BOARD_W;
+    int c = drop_idx % BOARD_W;
 
-    int head = 0, tail = 0;
-    queue[tail++]     = drop_idx;
-    visited[drop_idx] = true;
-
-    while (head < tail) {
-        int cur = queue[head++];
-        int d   = depth_arr[cur];
-        int r   = cur / BOARD_W;
-        int c   = cur % BOARD_W;
-
-        for (int dir = 0; dir < 4; dir++) {
-            int nr = r + DR[dir];
-            int nc = c + DC[dir];
-            if (nr < 0 || nr >= BOARD_H || nc < 0 || nc >= BOARD_W) continue;
-            int nb  = nr * BOARD_W + nc;
-            int opp = (dir + 2) % 4;
-            if (!s_board[nb].active || visited[nb]) continue;
-            if (s_board[cur].values[dir] >= s_board[nb].values[opp]) {
-                s_board[nb].flip_count++;
-                s_score      += 5 * (d + 1);
-                s_flip_t[nb]  = FLIP_ANIM;
-                visited[nb]   = true;
-                depth_arr[nb] = d + 1;
-                queue[tail++] = nb;
-            }
-        }
-    }
-
-    /* Extra pass: cards that reached the vanish threshold fire one final
-       activation against any neighbour not yet touched by the chain. */
-    for (int i = 0; i < BOARD_SIZE; i++) {
-        if (!s_board[i].active) continue;
-        if (s_board[i].flip_count < FLIP_THRESHOLD) continue;
-        int r = i / BOARD_W, c = i % BOARD_W;
-        for (int dir = 0; dir < 4; dir++) {
-            int nr = r + DR[dir];
-            int nc = c + DC[dir];
-            if (nr < 0 || nr >= BOARD_H || nc < 0 || nc >= BOARD_W) continue;
-            int nb  = nr * BOARD_W + nc;
-            int opp = (dir + 2) % 4;
-            if (!s_board[nb].active || visited[nb]) continue;
-            if (s_board[i].values[dir] >= s_board[nb].values[opp]) {
-                s_board[nb].flip_count++;
-                s_score     += 5;
-                s_flip_t[nb] = FLIP_ANIM;
-                visited[nb]  = true;
-            }
+    for (int dir = 0; dir < 4; dir++) {
+        int nr  = r + DR[dir];
+        int nc  = c + DC[dir];
+        if (nr < 0 || nr >= BOARD_H || nc < 0 || nc >= BOARD_W) continue;
+        int nb  = nr * BOARD_W + nc;
+        int opp = (dir + 2) % 4;
+        if (!s_board[nb].active) continue;
+        if (s_board[drop_idx].values[dir] >= s_board[nb].values[opp]) {
+            s_board[nb].flip_count++;
+            s_score     += 5;
+            s_flip_t[nb] = FLIP_ANIM;
         }
     }
 }
