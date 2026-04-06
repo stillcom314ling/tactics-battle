@@ -126,26 +126,77 @@ static Color card_color(int flip_count)
 
 /* ----------------------------------------------------------- flip resolution */
 
-/* Only the dropped card checks its 4 immediate neighbours.
-   Flipped cards do not chain — they just accumulate flip_count. */
+static void flip_nb(int nb, int dir, int pts)
+{
+    s_board[nb].flip_count++;
+    s_score         += pts;
+    s_flip_t[nb]     = FLIP_ANIM;
+    s_flip_horiz[nb] = (dir % 2 == 1); /* E(1)/W(3)→horiz, N(0)/S(2)→vert */
+}
+
+/* Resolution rules (applied in priority order):
+ *  Same  — 2+ sides where our value == their opposing value → flip all matching (+10 each)
+ *  Sum   — 2+ sides that share the same (our + their) total → flip all matching (+10 each)
+ *  Higher — remaining sides where our value >= their opposing value → flip (+5 each)
+ * Flipped cards do not chain. */
 static void run_resolve(int drop_idx)
 {
     int r = drop_idx / BOARD_W;
     int c = drop_idx % BOARD_W;
 
+    /* gather live neighbours */
+    int  nb_idx[4], nb_dir[4], nb_n = 0;
     for (int dir = 0; dir < 4; dir++) {
-        int nr  = r + DR[dir];
-        int nc  = c + DC[dir];
+        int nr = r + DR[dir], nc = c + DC[dir];
         if (nr < 0 || nr >= BOARD_H || nc < 0 || nc >= BOARD_W) continue;
-        int nb  = nr * BOARD_W + nc;
-        int opp = (dir + 2) % 4;
+        int nb = nr * BOARD_W + nc;
         if (!s_board[nb].active) continue;
-        if (s_board[drop_idx].values[dir] >= s_board[nb].values[opp]) {
-            s_board[nb].flip_count++;
-            s_score          += 5;
-            s_flip_t[nb]      = FLIP_ANIM;
-            s_flip_horiz[nb]  = (dir % 2 == 1); /* E(1)/W(3)→horiz, N(0)/S(2)→vert */
+        nb_idx[nb_n] = nb;
+        nb_dir[nb_n] = dir;
+        nb_n++;
+    }
+    if (nb_n == 0) return;
+
+    /* precompute values and sums */
+    int  our[4], their[4], psum[4];
+    bool same_flag[4] = {false};
+    int  same_count   = 0;
+    int  sum_freq[19] = {0};   /* sums 2–10 with values 1–5 */
+
+    for (int i = 0; i < nb_n; i++) {
+        int opp    = (nb_dir[i] + 2) % 4;
+        our[i]     = s_board[drop_idx].values[nb_dir[i]];
+        their[i]   = s_board[nb_idx[i]].values[opp];
+        psum[i]    = our[i] + their[i];
+        if (our[i] == their[i]) { same_flag[i] = true; same_count++; }
+        if (psum[i] < 19)       sum_freq[psum[i]]++;
+    }
+
+    bool handled[4] = {false};
+
+    /* Same rule: requires 2+ matching pairs */
+    if (same_count >= 2) {
+        for (int i = 0; i < nb_n; i++) {
+            if (!same_flag[i]) continue;
+            flip_nb(nb_idx[i], nb_dir[i], 10);
+            handled[i] = true;
         }
+    }
+
+    /* Sum rule: requires 2+ pairs sharing the same combined total */
+    for (int i = 0; i < nb_n; i++) {
+        if (handled[i]) continue;
+        if (psum[i] < 19 && sum_freq[psum[i]] >= 2) {
+            flip_nb(nb_idx[i], nb_dir[i], 10);
+            handled[i] = true;
+        }
+    }
+
+    /* Higher rule: fallback for any remaining neighbour */
+    for (int i = 0; i < nb_n; i++) {
+        if (handled[i]) continue;
+        if (our[i] >= their[i])
+            flip_nb(nb_idx[i], nb_dir[i], 5);
     }
 }
 
