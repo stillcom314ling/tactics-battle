@@ -51,8 +51,9 @@ static Vector2 s_drag_vis;          /* visual position follows finger */
 static float   s_drag_timer;
 
 /* per-card animation timers */
-static float   s_flip_t[BOARD_SIZE];  /* counts FLIP_ANIM → 0 */
-static float   s_spawn_t[BOARD_SIZE]; /* counts SPAWN_ANIM → 0 */
+static float   s_flip_t[BOARD_SIZE];     /* counts FLIP_ANIM → 0 */
+static bool    s_flip_horiz[BOARD_SIZE]; /* true = squish X (E/W beat), false = squish Y (N/S beat) */
+static float   s_spawn_t[BOARD_SIZE];    /* counts SPAWN_ANIM → 0 */
 
 /* -------------------------------------------------------------------- layout */
 
@@ -141,8 +142,9 @@ static void run_resolve(int drop_idx)
         if (!s_board[nb].active) continue;
         if (s_board[drop_idx].values[dir] >= s_board[nb].values[opp]) {
             s_board[nb].flip_count++;
-            s_score     += 5;
-            s_flip_t[nb] = FLIP_ANIM;
+            s_score          += 5;
+            s_flip_t[nb]      = FLIP_ANIM;
+            s_flip_horiz[nb]  = (dir % 2 == 1); /* E(1)/W(3)→horiz, N(0)/S(2)→vert */
         }
     }
 }
@@ -169,8 +171,9 @@ static void TriadDragInit(void)
     for (int i = 0; i < BOARD_SIZE; i++) {
         s_board[i]   = make_card();
         s_vis[i]     = cell_centre(i);
-        s_flip_t[i]  = 0.0f;
-        s_spawn_t[i] = 0.0f;
+        s_flip_t[i]     = 0.0f;
+        s_flip_horiz[i] = false;
+        s_spawn_t[i]    = 0.0f;
     }
     s_phase      = PHASE_IDLE;
     s_dragging   = false;
@@ -334,11 +337,13 @@ static void TriadDragDraw(void)
 
         float sx = 1.0f, sy = 1.0f;
 
-        /* flip squish: card collapses on X axis then re-expands */
+        /* flip squish: collapse on the axis matching the attack direction */
         if (s_flip_t[i] > 0.0f) {
-            float p = 1.0f - s_flip_t[i] / FLIP_ANIM;
-            sx = fabsf(2.0f * p - 1.0f);
-            if (sx < 0.05f) sx = 0.05f;
+            float p       = 1.0f - s_flip_t[i] / FLIP_ANIM;
+            float squeeze = fabsf(2.0f * p - 1.0f);
+            if (squeeze < 0.05f) squeeze = 0.05f;
+            if (s_flip_horiz[i]) sx = squeeze; /* E/W beat → squish horizontally */
+            else                 sy = squeeze; /* N/S beat → squish vertically   */
         }
 
         /* spawn scale-in: grows from 0 to full size */
