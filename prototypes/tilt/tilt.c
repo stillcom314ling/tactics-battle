@@ -2,6 +2,10 @@
 #include "raylib.h"
 #include <math.h>
 
+#ifdef PLATFORM_WEB
+#include <emscripten/emscripten.h>
+#endif
+
 #define BALL_RADIUS    30.0f
 #define ACCEL_SCALE   150.0f  /* px/s² per accel unit — tune if too slow/fast */
 #define DAMPING         0.97f /* velocity multiplier applied each frame */
@@ -10,16 +14,30 @@
 
 static Vector2 s_pos;
 static Vector2 s_vel;
-static Vector3 s_offset;  /* calibration: subtracted from raw accel reading */
+static float   s_offset_x;   /* calibration offsets */
+static float   s_offset_y;
 
 static int s_prev_touch_ids[MAX_TOUCHES];
 static int s_prev_touch_count;
 
 /* ----------------------------------------------------------------- helpers */
 
+/* Read raw accelerometer from the browser's devicemotion event.
+ * On desktop (no PLATFORM_WEB) always returns 0,0 — arrow keys take over. */
+static void get_accel(float *ax, float *ay)
+{
+#ifdef PLATFORM_WEB
+    *ax = (float)EM_ASM_DOUBLE({ return window._tiltAccelX || 0; });
+    *ay = (float)EM_ASM_DOUBLE({ return window._tiltAccelY || 0; });
+#else
+    *ax = 0.0f;
+    *ay = 0.0f;
+#endif
+}
+
 static void calibrate(void)
 {
-    s_offset = GetAccelerometerData();
+    get_accel(&s_offset_x, &s_offset_y);
 }
 
 /* ---------------------------------------------------------- prototype impl */
@@ -28,8 +46,29 @@ static void TiltInit(void)
 {
     s_pos = (Vector2){ GetScreenWidth() * 0.5f, GetScreenHeight() * 0.5f };
     s_vel = (Vector2){ 0.0f, 0.0f };
-    s_offset = (Vector3){ 0.0f, 0.0f, 0.0f };
+    s_offset_x = 0.0f;
+    s_offset_y = 0.0f;
     s_prev_touch_count = 0;
+
+#ifdef PLATFORM_WEB
+    /* Register the devicemotion listener once; guard against re-entry
+     * if the prototype is launched more than once. */
+    EM_ASM({
+        if (!window._tiltListenerAdded) {
+            window._tiltAccelX = 0;
+            window._tiltAccelY = 0;
+            window.addEventListener('devicemotion', function(e) {
+                var a = e.accelerationIncludingGravity;
+                if (a) {
+                    window._tiltAccelX = a.x || 0;
+                    window._tiltAccelY = a.y || 0;
+                }
+            });
+            window._tiltListenerAdded = true;
+        }
+    });
+#endif
+
     calibrate();  /* auto-calibrate so neutral tilt = ball at rest */
 }
 
@@ -50,8 +89,8 @@ static void TiltUpdate(float dt)
     };
 
     /* --- button tap detection ---
-     * Track touch IDs frame-to-frame; a touch that is new this frame and
-     * lands on the button triggers calibration (same pattern as balls.c). */
+     * Track touch IDs frame-to-frame; a touch new this frame that lands on
+     * the button triggers calibration (same pattern as balls.c). */
     int cur_count = GetTouchPointCount();
     int cur_ids[MAX_TOUCHES];
     Vector2 cur_pos[MAX_TOUCHES];
@@ -80,10 +119,12 @@ static void TiltUpdate(float dt)
     }
 
     /* --- accelerometer → ball acceleration ---
-     * On desktop GetAccelerometerData() returns (0,0,0); arrow keys take over. */
-    Vector3 accel = GetAccelerometerData();
-    float ax = (accel.x - s_offset.x) * ACCEL_SCALE;
-    float ay = -(accel.y - s_offset.y) * ACCEL_SCALE; /* negate: tilt forward = ball up */
+     * accelerationIncludingGravity: +x = right, +y = up (toward top of phone).
+     * Negate y so tilting the top away rolls the ball downward on screen. */
+    float ax_raw, ay_raw;
+    get_accel(&ax_raw, &ay_raw);
+    float ax = (ax_raw - s_offset_x) * ACCEL_SCALE;
+    float ay = -(ay_raw - s_offset_y) * ACCEL_SCALE;
 
     /* arrow-key fallback so the demo works without a phone */
     float key_strength = ACCEL_SCALE * 0.5f;
