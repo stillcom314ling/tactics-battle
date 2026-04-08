@@ -13,8 +13,9 @@
 #define MAX_TRAIL       (MAP_COLS + MAP_ROWS)
 #define MAX_PENDING      50
 #define DRAWER_SPEED     8.0f   /* animation fraction per second */
-#define SCAN_FLASH_SECS  0.45f
+#define SCAN_FLASH_SECS  0.60f
 #define ACTION_COUNT     4
+#define MAX_FLASH_CELLS  (MAP_COLS * MAP_ROWS)
 
 /* ------------------------------------------------------------------- types */
 
@@ -79,6 +80,11 @@ static int        s_action_counts[ACTION_COUNT];
 static DrawerState s_drawer;
 static float       s_drawer_t;   /* 0 = closed, 1 = open */
 static float       s_scan_flash; /* counts down from SCAN_FLASH_SECS */
+
+/* matched-cell flash positions — populated during scan, drawn during PHASE_SCANNING */
+static int s_flash_col[MAX_FLASH_CELLS];
+static int s_flash_row[MAX_FLASH_CELLS];
+static int s_flash_count;
 
 /* touch */
 static int     s_prev_tc;
@@ -246,6 +252,14 @@ static void add_connection(Terrain t, int amount)
     }
 }
 
+/* Pick a random terrain that is NOT the given type, for in-place replacement. */
+static Terrain random_different_terrain(Terrain exclude)
+{
+    Terrain t;
+    do { t = (Terrain)GetRandomValue(0, TERRAIN_COUNT - 1); } while (t == exclude);
+    return t;
+}
+
 static void scan_line_horizontal(int row)
 {
     int c = 0;
@@ -253,7 +267,18 @@ static void scan_line_horizontal(int row)
         Terrain t   = s_map[row][c];
         int     run = 1;
         while (c + run < MAP_COLS && s_map[row][c + run] == t) run++;
-        if (run >= 3) add_connection(t, run >= 5 ? 2 : 1);
+        if (run >= 3) {
+            add_connection(t, run >= 5 ? 2 : 1);
+            /* replace matched tiles in-place with new random terrain */
+            for (int k = 0; k < run; k++) {
+                if (s_flash_count < MAX_FLASH_CELLS) {
+                    s_flash_col[s_flash_count] = c + k;
+                    s_flash_row[s_flash_count] = row;
+                    s_flash_count++;
+                }
+                s_map[row][c + k] = random_different_terrain(t);
+            }
+        }
         c += run;
     }
 }
@@ -265,7 +290,18 @@ static void scan_line_vertical(int col)
         Terrain t   = s_map[r][col];
         int     run = 1;
         while (r + run < MAP_ROWS && s_map[r + run][col] == t) run++;
-        if (run >= 3) add_connection(t, run >= 5 ? 2 : 1);
+        if (run >= 3) {
+            add_connection(t, run >= 5 ? 2 : 1);
+            /* replace matched tiles in-place with new random terrain */
+            for (int k = 0; k < run; k++) {
+                if (s_flash_count < MAX_FLASH_CELLS) {
+                    s_flash_col[s_flash_count] = col;
+                    s_flash_row[s_flash_count] = r + k;
+                    s_flash_count++;
+                }
+                s_map[r + k][col] = random_different_terrain(t);
+            }
+        }
         r += run;
     }
 }
@@ -298,9 +334,10 @@ static void try_action(int idx)
 static void end_turn(void)
 {
     s_is_dragging = false;
+    s_flash_count = 0;
     scan_matches();
     s_phase      = PHASE_SCANNING;
-    s_scan_flash = SCAN_FLASH_SECS;
+    s_scan_flash = (s_flash_count > 0) ? SCAN_FLASH_SECS : 0.0f;
     s_turn_timer = TURN_SECS;
 }
 
@@ -437,24 +474,31 @@ static void draw_trail(void)
 
 static void draw_scan_flash(void)
 {
-    if (s_phase != PHASE_SCANNING || s_scan_flash <= 0.0f) return;
-    float alpha = (s_scan_flash / SCAN_FLASH_SECS) * 160.0f;
-    unsigned char a = (unsigned char)alpha;
-    int ts = tile_px();
-    int sh = GetScreenHeight();
-    int sw = GetScreenWidth();
+    if (s_phase != PHASE_SCANNING || s_scan_flash <= 0.0f || s_flash_count == 0) return;
 
-    for (int i = 0; i < s_scanned_col_count; i++) {
-        int col = s_scanned_cols[i];
-        if (col < s_vp_col || col >= s_vp_col + vis_cols()) continue;
+    /* pulse: bright at start, fades out */
+    float frac  = s_scan_flash / SCAN_FLASH_SECS;
+    /* rapid pulse using sine so tiles visibly strobe */
+    float pulse = 0.55f + 0.45f * sinf(frac * 3.14159f * 4.0f);
+    unsigned char a = (unsigned char)(pulse * 220.0f);
+
+    int ts = tile_px();
+    int vc = vis_cols();
+    int vr = vis_rows();
+
+    for (int i = 0; i < s_flash_count; i++) {
+        int col = s_flash_col[i];
+        int row = s_flash_row[i];
+        if (col < s_vp_col || col >= s_vp_col + vc) continue;
+        if (row < s_vp_row || row >= s_vp_row + vr) continue;
         int sx = (col - s_vp_col) * ts;
-        DrawRectangle(sx, 0, ts - 1, sh, (Color){ 255, 255, 160, a });
-    }
-    for (int i = 0; i < s_scanned_row_count; i++) {
-        int row = s_scanned_rows[i];
-        if (row < s_vp_row || row >= s_vp_row + vis_rows()) continue;
         int sy = (row - s_vp_row) * ts;
-        DrawRectangle(0, sy, sw, ts - 1, (Color){ 255, 255, 160, a });
+        /* bright white flash over the replaced tile */
+        DrawRectangle(sx, sy, ts - 1, ts - 1, (Color){ 255, 255, 200, a });
+        /* sparkle border */
+        DrawRectangleLinesEx(
+            (Rectangle){ (float)sx, (float)sy, (float)(ts - 1), (float)(ts - 1) },
+            2.0f, (Color){ 255, 220, 60, (unsigned char)(a * 0.8f) });
     }
 }
 
@@ -660,6 +704,7 @@ static void RealmWalkInit(void)
     memset(s_action_counts, 0, sizeof(s_action_counts));
 
     s_pending_count = 0;
+    s_flash_count   = 0;
     s_drawer        = DRAWER_CLOSED;
     s_drawer_t      = 0.0f;
     s_prev_tc       = 0;
