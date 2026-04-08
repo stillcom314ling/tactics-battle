@@ -9,6 +9,7 @@
 #define MAP_COLS        30
 #define MAP_ROWS        20
 #define SCROLL_EDGE      2      /* hero cells from vp edge that trigger scroll */
+#define SCROLL_SPEED     4.0f  /* max tiles per second the camera moves */
 #define TURN_SECS        7.0f
 #define MAX_TRAIL       (MAP_COLS + MAP_ROWS)
 #define MAX_PENDING      50
@@ -51,8 +52,9 @@ typedef struct {
 
 static Terrain s_map[MAP_ROWS][MAP_COLS];
 
-static int s_hero_col, s_hero_row;
-static int s_vp_col,   s_vp_row;
+static int   s_hero_col, s_hero_row;
+static int   s_vp_col,   s_vp_row;   /* logical scroll target (integer tiles) */
+static float s_vp_col_f, s_vp_row_f; /* visual position (lerps toward target) */
 
 /* drag / turn */
 static bool  s_is_dragging;
@@ -155,8 +157,8 @@ static Vector2 tile_center_screen(int map_col, int map_row)
 {
     int ts = tile_px();
     return (Vector2){
-        (float)((map_col - s_vp_col) * ts + ts / 2),
-        (float)((map_row - s_vp_row) * ts + ts / 2),
+        ((float)map_col - s_vp_col_f) * (float)ts + (float)ts * 0.5f,
+        ((float)map_row - s_vp_row_f) * (float)ts + (float)ts * 0.5f,
     };
 }
 
@@ -441,10 +443,15 @@ static void draw_map_tiles(void)
     int ts = tile_px();
     int vc = vis_cols();
     int vr = vis_rows();
-    for (int row = s_vp_row; row < s_vp_row + vr && row < MAP_ROWS; row++) {
-        for (int col = s_vp_col; col < s_vp_col + vc && col < MAP_COLS; col++) {
-            int   sx = (col - s_vp_col) * ts;
-            int   sy = (row - s_vp_row) * ts;
+    /* start one tile before the logical origin to cover the sub-tile offset */
+    int col_start = s_vp_col - 1;
+    int row_start = s_vp_row - 1;
+    if (col_start < 0) col_start = 0;
+    if (row_start < 0) row_start = 0;
+    for (int row = row_start; row < s_vp_row + vr + 1 && row < MAP_ROWS; row++) {
+        for (int col = col_start; col < s_vp_col + vc + 1 && col < MAP_COLS; col++) {
+            int   sx = (int)(((float)col - s_vp_col_f) * (float)ts);
+            int   sy = (int)(((float)row - s_vp_row_f) * (float)ts);
             Color c  = TERRAIN_COLOR[s_map[row][col]];
             DrawRectangle(sx, sy, ts - 1, ts - 1, c);
             char letter[2] = { TERRAIN_LETTER[s_map[row][col]], '\0' };
@@ -463,11 +470,11 @@ static void draw_trail(void)
     for (int i = 0; i < s_trail_len; i++) {
         int col = s_trail_col[i];
         int row = s_trail_row[i];
-        /* skip if off-screen */
-        if (col < s_vp_col || col >= s_vp_col + vis_cols()) continue;
-        if (row < s_vp_row || row >= s_vp_row + vis_rows()) continue;
-        int sx = (col - s_vp_col) * ts;
-        int sy = (row - s_vp_row) * ts;
+        int sx  = (int)(((float)col - s_vp_col_f) * (float)ts);
+        int sy  = (int)(((float)row - s_vp_row_f) * (float)ts);
+        /* skip if fully off-screen */
+        if (sx + ts < 0 || sx > GetScreenWidth())  continue;
+        if (sy + ts < 0 || sy > GetScreenHeight()) continue;
         DrawRectangle(sx, sy, ts - 1, ts - 1, (Color){ 255, 255, 255, 45 });
     }
 }
@@ -483,16 +490,14 @@ static void draw_scan_flash(void)
     unsigned char a = (unsigned char)(pulse * 220.0f);
 
     int ts = tile_px();
-    int vc = vis_cols();
-    int vr = vis_rows();
 
     for (int i = 0; i < s_flash_count; i++) {
         int col = s_flash_col[i];
         int row = s_flash_row[i];
-        if (col < s_vp_col || col >= s_vp_col + vc) continue;
-        if (row < s_vp_row || row >= s_vp_row + vr) continue;
-        int sx = (col - s_vp_col) * ts;
-        int sy = (row - s_vp_row) * ts;
+        int sx  = (int)(((float)col - s_vp_col_f) * (float)ts);
+        int sy  = (int)(((float)row - s_vp_row_f) * (float)ts);
+        if (sx + ts < 0 || sx > GetScreenWidth())  continue;
+        if (sy + ts < 0 || sy > GetScreenHeight()) continue;
         /* bright white flash over the replaced tile */
         DrawRectangle(sx, sy, ts - 1, ts - 1, (Color){ 255, 255, 200, a });
         /* sparkle border */
@@ -690,6 +695,10 @@ static void RealmWalkInit(void)
     if (s_vp_col + vc > MAP_COLS) s_vp_col = MAP_COLS - vc;
     if (s_vp_row + vr > MAP_ROWS) s_vp_row = MAP_ROWS - vr;
 
+    /* start render position exactly on the logical position (no initial slide) */
+    s_vp_col_f = (float)s_vp_col;
+    s_vp_row_f = (float)s_vp_row;
+
     s_is_dragging       = false;
     s_phase             = PHASE_IDLE;
     s_turn_timer        = TURN_SECS;
@@ -753,6 +762,17 @@ static void RealmWalkUpdate(float dt)
     /* drawer animation */
     float target = (s_drawer == DRAWER_OPEN) ? 1.0f : 0.0f;
     s_drawer_t  += (target - s_drawer_t) * fminf(DRAWER_SPEED * dt, 1.0f);
+
+    /* camera scroll — move render position toward logical target at capped speed */
+    float max_step = SCROLL_SPEED * dt;
+
+    float diff_col = (float)s_vp_col - s_vp_col_f;
+    if (fabsf(diff_col) <= max_step) s_vp_col_f = (float)s_vp_col;
+    else s_vp_col_f += (diff_col > 0.0f ? 1.0f : -1.0f) * max_step;
+
+    float diff_row = (float)s_vp_row - s_vp_row_f;
+    if (fabsf(diff_row) <= max_step) s_vp_row_f = (float)s_vp_row;
+    else s_vp_row_f += (diff_row > 0.0f ? 1.0f : -1.0f) * max_step;
 }
 
 static void RealmWalkDraw(void)
