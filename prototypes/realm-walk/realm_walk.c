@@ -13,6 +13,7 @@
 #define TURN_SECS        7.0f
 #define MAX_TRAIL       (MAP_COLS + MAP_ROWS)
 #define MAX_PENDING      50
+#define MOVE_COOLDOWN    0.12f  /* seconds between hero steps while dragging */
 #define DRAWER_SPEED     8.0f   /* animation fraction per second */
 #define SCAN_FLASH_SECS  0.60f
 #define ACTION_COUNT     4
@@ -87,6 +88,9 @@ static float       s_scan_flash; /* counts down from SCAN_FLASH_SECS */
 static int s_flash_col[MAX_FLASH_CELLS];
 static int s_flash_row[MAX_FLASH_CELLS];
 static int s_flash_count;
+
+/* movement pacing */
+static float s_move_cd;
 
 /* touch */
 static int     s_prev_tc;
@@ -382,11 +386,13 @@ static void on_down(Vector2 pos)
     record_visited(s_hero_col, s_hero_row);
     s_vp_col_prev = s_vp_col;
     s_vp_row_prev = s_vp_row;
+    s_move_cd     = 0.0f;
 }
 
 static void on_move(Vector2 pos)
 {
     if (!s_is_dragging) return;
+    if (s_move_cd > 0.0f) return;   /* wait for cooldown between steps */
 
     /* Compensate for viewport shifts since last move.  When the viewport
        scrolls, the same screen pixel maps to a different tile.  Subtract
@@ -414,6 +420,7 @@ static void on_move(Vector2 pos)
         step_row += (dr > 0) ? 1 : -1;
 
     advance_hero(step_col, step_row);
+    s_move_cd = MOVE_COOLDOWN;
 }
 
 static void on_up(Vector2 pos)
@@ -473,6 +480,7 @@ static void draw_map_tiles(void)
     int vr = vis_rows();
     for (int row = s_vp_row; row < s_vp_row + vr && row < MAP_ROWS; row++) {
         for (int col = s_vp_col; col < s_vp_col + vc && col < MAP_COLS; col++) {
+            if (col == s_hero_col && row == s_hero_row) continue;
             int   sx = (col - s_vp_col) * ts;
             int   sy = (row - s_vp_row) * ts;
             Color c  = TERRAIN_COLOR[s_map[row][col]];
@@ -534,17 +542,21 @@ static void draw_scan_flash(void)
 
 static void draw_hero(void)
 {
-    int     ts  = tile_px();
-    Vector2 ctr = tile_center_screen(s_hero_col, s_hero_row);
-    float   r   = (float)ts * 0.38f;
-    /* shadow */
-    DrawCircleV((Vector2){ ctr.x + 3, ctr.y + 5 }, r, (Color){ 0, 0, 0, 70 });
-    /* outer ring */
-    DrawCircleV(ctr, r, (Color){ 240, 220, 100, 255 });
-    /* inner fill */
-    DrawCircleV(ctr, r * 0.72f, (Color){ 255, 255, 255, 255 });
-    /* centre dot */
-    DrawCircleV(ctr, r * 0.22f, (Color){ 60, 40, 20, 200 });
+    int ts = tile_px();
+    int sx = (s_hero_col - s_vp_col) * ts;
+    int sy = (s_hero_row - s_vp_row) * ts;
+
+    /* tile fill */
+    DrawRectangle(sx, sy, ts - 1, ts - 1, (Color){ 240, 220, 100, 255 });
+    /* highlight border */
+    DrawRectangleLinesEx(
+        (Rectangle){ (float)sx, (float)sy, (float)(ts - 1), (float)(ts - 1) },
+        2.0f, (Color){ 180, 140, 40, 255 });
+    /* letter */
+    int  fs = ts * 36 / 100;
+    int  lw = MeasureText("H", fs);
+    DrawText("H", sx + (ts - 1 - lw) / 2, sy + (ts - 1 - fs) / 2,
+             fs, (Color){ 80, 50, 10, 200 });
 }
 
 static void draw_timer_bar(void)
@@ -737,6 +749,7 @@ static void RealmWalkInit(void)
 
     s_pending_count = 0;
     s_flash_count   = 0;
+    s_move_cd       = 0.0f;
     s_drawer        = DRAWER_CLOSED;
     s_drawer_t      = 0.0f;
     s_prev_tc       = 0;
@@ -764,8 +777,9 @@ static void RealmWalkUpdate(float dt)
         else if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) on_up(mp);
     }
 
-    /* turn timer */
+    /* move cooldown + turn timer */
     if (s_phase == PHASE_DRAGGING) {
+        if (s_move_cd > 0.0f) s_move_cd -= dt;
         s_turn_timer -= dt;
         if (s_turn_timer <= 0.0f) {
             s_turn_timer = 0.0f;
