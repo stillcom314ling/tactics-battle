@@ -200,10 +200,12 @@ static void record_visited(int col, int row)
     }
 }
 
-static void check_scroll_trigger(void)
+static bool check_scroll_trigger(void)
 {
     int vc = vis_cols();
     int vr = vis_rows();
+    int old_vp_col = s_vp_col;
+    int old_vp_row = s_vp_row;
 
     /* Scroll when hero strays more than SCROLL_DEAD_ZONE cells from
        the viewport centre.  Moving by 1 cell puts the hero back inside
@@ -223,13 +225,15 @@ static void check_scroll_trigger(void)
     if (s_vp_col + vc > MAP_COLS)  s_vp_col = MAP_COLS - vc;
     if (s_vp_row < 0)              s_vp_row = 0;
     if (s_vp_row + vr > MAP_ROWS)  s_vp_row = MAP_ROWS - vr;
+
+    return (s_vp_col != old_vp_col || s_vp_row != old_vp_row);
 }
 
-static void advance_hero(int new_col, int new_row)
+static bool advance_hero(int new_col, int new_row)
 {
-    if (new_col < 0 || new_col >= MAP_COLS) return;
-    if (new_row < 0 || new_row >= MAP_ROWS) return;
-    if (new_col == s_hero_col && new_row == s_hero_row) return;
+    if (new_col < 0 || new_col >= MAP_COLS) return false;
+    if (new_row < 0 || new_row >= MAP_ROWS) return false;
+    if (new_col == s_hero_col && new_row == s_hero_row) return false;
 
     /* Slide the tile at the destination back to the hero's previous cell */
     s_map[s_hero_row][s_hero_col] = s_map[new_row][new_col];
@@ -244,7 +248,7 @@ static void advance_hero(int new_col, int new_row)
     s_hero_row = new_row;
 
     record_visited(new_col, new_row);
-    check_scroll_trigger();
+    return check_scroll_trigger();
 }
 
 static void add_connection(Terrain t, int amount)
@@ -419,8 +423,8 @@ static void on_move(Vector2 pos)
     else
         step_row += (dr > 0) ? 1 : -1;
 
-    advance_hero(step_col, step_row);
-    s_move_cd = MOVE_COOLDOWN;
+    bool scrolled = advance_hero(step_col, step_row);
+    if (scrolled) s_move_cd = MOVE_COOLDOWN;
 }
 
 static void on_up(Vector2 pos)
