@@ -2,13 +2,14 @@
 #include "raylib.h"
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ---------------------------------------------------------------- constants */
 
 #define MAP_COLS        30
 #define MAP_ROWS        20
-#define SCROLL_EDGE      2      /* hero cells from vp edge that trigger scroll */
+#define SCROLL_DEAD_ZONE 2      /* hero cells from vp center before scroll */
 #define TURN_SECS        7.0f
 #define MAX_TRAIL       (MAP_COLS + MAP_ROWS)
 #define MAX_PENDING      50
@@ -53,6 +54,7 @@ static Terrain s_map[MAP_ROWS][MAP_COLS];
 
 static int s_hero_col, s_hero_row;
 static int s_vp_col,   s_vp_row;
+static int s_vp_col_prev, s_vp_row_prev;  /* previous vp, for scroll compensation */
 
 /* drag / turn */
 static bool  s_is_dragging;
@@ -199,22 +201,24 @@ static void check_scroll_trigger(void)
     int vc = vis_cols();
     int vr = vis_rows();
 
-    if (s_hero_col >= s_vp_col + vc - SCROLL_EDGE) {
-        s_vp_col++;
-        if (s_vp_col + vc > MAP_COLS) s_vp_col = MAP_COLS - vc;
-    }
-    if (s_hero_col < s_vp_col + SCROLL_EDGE) {
-        s_vp_col--;
-        if (s_vp_col < 0) s_vp_col = 0;
-    }
-    if (s_hero_row >= s_vp_row + vr - SCROLL_EDGE) {
-        s_vp_row++;
-        if (s_vp_row + vr > MAP_ROWS) s_vp_row = MAP_ROWS - vr;
-    }
-    if (s_hero_row < s_vp_row + SCROLL_EDGE) {
-        s_vp_row--;
-        if (s_vp_row < 0) s_vp_row = 0;
-    }
+    /* Scroll when hero strays more than SCROLL_DEAD_ZONE cells from
+       the viewport centre.  Moving by 1 cell puts the hero back inside
+       the dead zone, which prevents the old edge-cascade problem. */
+    int center_col = s_vp_col + vc / 2;
+    int center_row = s_vp_row + vr / 2;
+    int off_col = s_hero_col - center_col;
+    int off_row = s_hero_row - center_row;
+
+    if (off_col > SCROLL_DEAD_ZONE)       s_vp_col++;
+    else if (off_col < -SCROLL_DEAD_ZONE) s_vp_col--;
+
+    if (off_row > SCROLL_DEAD_ZONE)       s_vp_row++;
+    else if (off_row < -SCROLL_DEAD_ZONE) s_vp_row--;
+
+    if (s_vp_col < 0)              s_vp_col = 0;
+    if (s_vp_col + vc > MAP_COLS)  s_vp_col = MAP_COLS - vc;
+    if (s_vp_row < 0)              s_vp_row = 0;
+    if (s_vp_row + vr > MAP_ROWS)  s_vp_row = MAP_ROWS - vr;
 }
 
 static void advance_hero(int new_col, int new_row)
@@ -376,14 +380,40 @@ static void on_down(Vector2 pos)
     memset(s_col_visited, 0, sizeof(s_col_visited));
     memset(s_row_visited, 0, sizeof(s_row_visited));
     record_visited(s_hero_col, s_hero_row);
+    s_vp_col_prev = s_vp_col;
+    s_vp_row_prev = s_vp_row;
 }
 
 static void on_move(Vector2 pos)
 {
     if (!s_is_dragging) return;
+
+    /* Compensate for viewport shifts since last move.  When the viewport
+       scrolls, the same screen pixel maps to a different tile.  Subtract
+       the pixel displacement so the hero only moves when the *finger*
+       actually moves to a new tile. */
+    int ts = tile_px();
+    float adj_x = pos.x - (float)((s_vp_col - s_vp_col_prev) * ts);
+    float adj_y = pos.y - (float)((s_vp_row - s_vp_row_prev) * ts);
+    s_vp_col_prev = s_vp_col;
+    s_vp_row_prev = s_vp_row;
+
     int col, row;
-    if (!screen_to_tile(pos, &col, &row)) return;
-    advance_hero(col, row);
+    if (!screen_to_tile((Vector2){ adj_x, adj_y }, &col, &row)) return;
+
+    /* Only step one orthogonal cell at a time toward the cursor tile. */
+    int dc = col - s_hero_col;
+    int dr = row - s_hero_row;
+    if (dc == 0 && dr == 0) return;
+
+    int step_col = s_hero_col;
+    int step_row = s_hero_row;
+    if (abs(dc) >= abs(dr))
+        step_col += (dc > 0) ? 1 : -1;
+    else
+        step_row += (dr > 0) ? 1 : -1;
+
+    advance_hero(step_col, step_row);
 }
 
 static void on_up(Vector2 pos)
@@ -689,6 +719,8 @@ static void RealmWalkInit(void)
     if (s_vp_row < 0) s_vp_row = 0;
     if (s_vp_col + vc > MAP_COLS) s_vp_col = MAP_COLS - vc;
     if (s_vp_row + vr > MAP_ROWS) s_vp_row = MAP_ROWS - vr;
+    s_vp_col_prev = s_vp_col;
+    s_vp_row_prev = s_vp_row;
 
     s_is_dragging       = false;
     s_phase             = PHASE_IDLE;
