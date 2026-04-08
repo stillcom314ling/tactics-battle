@@ -2,16 +2,18 @@
 #include "raylib.h"
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ---------------------------------------------------------------- constants */
 
 #define MAP_COLS        30
 #define MAP_ROWS        20
-#define SCROLL_EDGE      2      /* hero cells from vp edge that trigger scroll */
+#define SCROLL_DEAD_ZONE 2      /* hero cells from vp center before scroll */
 #define TURN_SECS        7.0f
 #define MAX_TRAIL       (MAP_COLS + MAP_ROWS)
 #define MAX_PENDING      50
+#define MOVE_COOLDOWN    0.12f  /* seconds between hero steps while dragging */
 #define DRAWER_SPEED     8.0f   /* animation fraction per second */
 #define SCAN_FLASH_SECS  0.60f
 #define ACTION_COUNT     4
@@ -53,6 +55,7 @@ static Terrain s_map[MAP_ROWS][MAP_COLS];
 
 static int s_hero_col, s_hero_row;
 static int s_vp_col,   s_vp_row;
+static int s_vp_col_prev, s_vp_row_prev;  /* previous vp, for scroll compensation */
 
 /* drag / turn */
 static bool  s_is_dragging;
@@ -85,6 +88,9 @@ static float       s_scan_flash; /* counts down from SCAN_FLASH_SECS */
 static int s_flash_col[MAX_FLASH_CELLS];
 static int s_flash_row[MAX_FLASH_CELLS];
 static int s_flash_count;
+
+/* movement pacing */
+static float s_move_cd;
 
 /* touch */
 static int     s_prev_tc;
@@ -194,34 +200,40 @@ static void record_visited(int col, int row)
     }
 }
 
-static void check_scroll_trigger(void)
+static bool check_scroll_trigger(void)
 {
     int vc = vis_cols();
     int vr = vis_rows();
+    int old_vp_col = s_vp_col;
+    int old_vp_row = s_vp_row;
 
-    if (s_hero_col >= s_vp_col + vc - SCROLL_EDGE) {
-        s_vp_col++;
-        if (s_vp_col + vc > MAP_COLS) s_vp_col = MAP_COLS - vc;
-    }
-    if (s_hero_col < s_vp_col + SCROLL_EDGE) {
-        s_vp_col--;
-        if (s_vp_col < 0) s_vp_col = 0;
-    }
-    if (s_hero_row >= s_vp_row + vr - SCROLL_EDGE) {
-        s_vp_row++;
-        if (s_vp_row + vr > MAP_ROWS) s_vp_row = MAP_ROWS - vr;
-    }
-    if (s_hero_row < s_vp_row + SCROLL_EDGE) {
-        s_vp_row--;
-        if (s_vp_row < 0) s_vp_row = 0;
-    }
+    /* Scroll when hero strays more than SCROLL_DEAD_ZONE cells from
+       the viewport centre.  Moving by 1 cell puts the hero back inside
+       the dead zone, which prevents the old edge-cascade problem. */
+    int center_col = s_vp_col + vc / 2;
+    int center_row = s_vp_row + vr / 2;
+    int off_col = s_hero_col - center_col;
+    int off_row = s_hero_row - center_row;
+
+    if (off_col > SCROLL_DEAD_ZONE)       s_vp_col++;
+    else if (off_col < -SCROLL_DEAD_ZONE) s_vp_col--;
+
+    if (off_row > SCROLL_DEAD_ZONE)       s_vp_row++;
+    else if (off_row < -SCROLL_DEAD_ZONE) s_vp_row--;
+
+    if (s_vp_col < 0)              s_vp_col = 0;
+    if (s_vp_col + vc > MAP_COLS)  s_vp_col = MAP_COLS - vc;
+    if (s_vp_row < 0)              s_vp_row = 0;
+    if (s_vp_row + vr > MAP_ROWS)  s_vp_row = MAP_ROWS - vr;
+
+    return (s_vp_col != old_vp_col || s_vp_row != old_vp_row);
 }
 
-static void advance_hero(int new_col, int new_row)
+static bool advance_hero(int new_col, int new_row)
 {
-    if (new_col < 0 || new_col >= MAP_COLS) return;
-    if (new_row < 0 || new_row >= MAP_ROWS) return;
-    if (new_col == s_hero_col && new_row == s_hero_row) return;
+    if (new_col < 0 || new_col >= MAP_COLS) return false;
+    if (new_row < 0 || new_row >= MAP_ROWS) return false;
+    if (new_col == s_hero_col && new_row == s_hero_row) return false;
 
     /* Slide the tile at the destination back to the hero's previous cell */
     s_map[s_hero_row][s_hero_col] = s_map[new_row][new_col];
@@ -236,7 +248,7 @@ static void advance_hero(int new_col, int new_row)
     s_hero_row = new_row;
 
     record_visited(new_col, new_row);
-    check_scroll_trigger();
+    return check_scroll_trigger();
 }
 
 static void add_connection(Terrain t, int amount)
@@ -376,14 +388,43 @@ static void on_down(Vector2 pos)
     memset(s_col_visited, 0, sizeof(s_col_visited));
     memset(s_row_visited, 0, sizeof(s_row_visited));
     record_visited(s_hero_col, s_hero_row);
+    s_vp_col_prev = s_vp_col;
+    s_vp_row_prev = s_vp_row;
+    s_move_cd     = 0.0f;
 }
 
 static void on_move(Vector2 pos)
 {
     if (!s_is_dragging) return;
+    if (s_move_cd > 0.0f) return;   /* wait for cooldown between steps */
+
+    /* Compensate for viewport shifts since last move.  When the viewport
+       scrolls, the same screen pixel maps to a different tile.  Subtract
+       the pixel displacement so the hero only moves when the *finger*
+       actually moves to a new tile. */
+    int ts = tile_px();
+    float adj_x = pos.x - (float)((s_vp_col - s_vp_col_prev) * ts);
+    float adj_y = pos.y - (float)((s_vp_row - s_vp_row_prev) * ts);
+    s_vp_col_prev = s_vp_col;
+    s_vp_row_prev = s_vp_row;
+
     int col, row;
-    if (!screen_to_tile(pos, &col, &row)) return;
-    advance_hero(col, row);
+    if (!screen_to_tile((Vector2){ adj_x, adj_y }, &col, &row)) return;
+
+    /* Only step one orthogonal cell at a time toward the cursor tile. */
+    int dc = col - s_hero_col;
+    int dr = row - s_hero_row;
+    if (dc == 0 && dr == 0) return;
+
+    int step_col = s_hero_col;
+    int step_row = s_hero_row;
+    if (abs(dc) >= abs(dr))
+        step_col += (dc > 0) ? 1 : -1;
+    else
+        step_row += (dr > 0) ? 1 : -1;
+
+    bool scrolled = advance_hero(step_col, step_row);
+    if (scrolled) s_move_cd = MOVE_COOLDOWN;
 }
 
 static void on_up(Vector2 pos)
@@ -443,6 +484,7 @@ static void draw_map_tiles(void)
     int vr = vis_rows();
     for (int row = s_vp_row; row < s_vp_row + vr && row < MAP_ROWS; row++) {
         for (int col = s_vp_col; col < s_vp_col + vc && col < MAP_COLS; col++) {
+            if (col == s_hero_col && row == s_hero_row) continue;
             int   sx = (col - s_vp_col) * ts;
             int   sy = (row - s_vp_row) * ts;
             Color c  = TERRAIN_COLOR[s_map[row][col]];
@@ -504,17 +546,21 @@ static void draw_scan_flash(void)
 
 static void draw_hero(void)
 {
-    int     ts  = tile_px();
-    Vector2 ctr = tile_center_screen(s_hero_col, s_hero_row);
-    float   r   = (float)ts * 0.38f;
-    /* shadow */
-    DrawCircleV((Vector2){ ctr.x + 3, ctr.y + 5 }, r, (Color){ 0, 0, 0, 70 });
-    /* outer ring */
-    DrawCircleV(ctr, r, (Color){ 240, 220, 100, 255 });
-    /* inner fill */
-    DrawCircleV(ctr, r * 0.72f, (Color){ 255, 255, 255, 255 });
-    /* centre dot */
-    DrawCircleV(ctr, r * 0.22f, (Color){ 60, 40, 20, 200 });
+    int ts = tile_px();
+    int sx = (s_hero_col - s_vp_col) * ts;
+    int sy = (s_hero_row - s_vp_row) * ts;
+
+    /* tile fill */
+    DrawRectangle(sx, sy, ts - 1, ts - 1, (Color){ 240, 220, 100, 255 });
+    /* highlight border */
+    DrawRectangleLinesEx(
+        (Rectangle){ (float)sx, (float)sy, (float)(ts - 1), (float)(ts - 1) },
+        2.0f, (Color){ 180, 140, 40, 255 });
+    /* letter */
+    int  fs = ts * 36 / 100;
+    int  lw = MeasureText("H", fs);
+    DrawText("H", sx + (ts - 1 - lw) / 2, sy + (ts - 1 - fs) / 2,
+             fs, (Color){ 80, 50, 10, 200 });
 }
 
 static void draw_timer_bar(void)
@@ -689,6 +735,8 @@ static void RealmWalkInit(void)
     if (s_vp_row < 0) s_vp_row = 0;
     if (s_vp_col + vc > MAP_COLS) s_vp_col = MAP_COLS - vc;
     if (s_vp_row + vr > MAP_ROWS) s_vp_row = MAP_ROWS - vr;
+    s_vp_col_prev = s_vp_col;
+    s_vp_row_prev = s_vp_row;
 
     s_is_dragging       = false;
     s_phase             = PHASE_IDLE;
@@ -705,6 +753,7 @@ static void RealmWalkInit(void)
 
     s_pending_count = 0;
     s_flash_count   = 0;
+    s_move_cd       = 0.0f;
     s_drawer        = DRAWER_CLOSED;
     s_drawer_t      = 0.0f;
     s_prev_tc       = 0;
@@ -732,8 +781,9 @@ static void RealmWalkUpdate(float dt)
         else if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) on_up(mp);
     }
 
-    /* turn timer */
+    /* move cooldown + turn timer */
     if (s_phase == PHASE_DRAGGING) {
+        if (s_move_cd > 0.0f) s_move_cd -= dt;
         s_turn_timer -= dt;
         if (s_turn_timer <= 0.0f) {
             s_turn_timer = 0.0f;
