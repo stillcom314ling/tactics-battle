@@ -1,4 +1,5 @@
 #include "realm_walk.h"
+#include "grid_match.h"
 #include "raylib.h"
 #include <math.h>
 #include <stdio.h>
@@ -95,6 +96,12 @@ static float s_move_cd;
 /* touch */
 static int     s_prev_tc;
 static Vector2 s_prev_touch;
+
+/* pattern matching */
+#define PATTERN_COUNT 4
+static Pattern s_patterns[PATTERN_COUNT];
+static Tile    s_board_tiles[MAP_ROWS * MAP_COLS];
+static Board   s_board;
 
 /* -------------------------------------------------------------- data tables */
 
@@ -272,58 +279,48 @@ static Terrain random_different_terrain(Terrain exclude)
     return t;
 }
 
-static void scan_line_horizontal(int row)
+static void sync_board(void)
 {
-    int c = 0;
-    while (c < MAP_COLS) {
-        Terrain t   = s_map[row][c];
-        int     run = 1;
-        while (c + run < MAP_COLS && s_map[row][c + run] == t) run++;
-        if (run >= 3) {
-            add_connection(t, run >= 5 ? 2 : 1);
-            /* replace matched tiles in-place with new random terrain */
-            for (int k = 0; k < run; k++) {
-                if (s_flash_count < MAX_FLASH_CELLS) {
-                    s_flash_col[s_flash_count] = c + k;
-                    s_flash_row[s_flash_count] = row;
-                    s_flash_count++;
-                }
-                s_map[row][c + k] = random_different_terrain(t);
-            }
+    s_board.width  = MAP_COLS;
+    s_board.height = MAP_ROWS;
+    s_board.tiles  = s_board_tiles;
+    for (int r = 0; r < MAP_ROWS; r++)
+        for (int c = 0; c < MAP_COLS; c++) {
+            Terrain t = s_map[r][c];
+            s_board_tiles[r * MAP_COLS + c] = (Tile){
+                .id   = (int)t,
+                .tags = (1u << t)
+            };
         }
-        c += run;
-    }
-}
-
-static void scan_line_vertical(int col)
-{
-    int r = 0;
-    while (r < MAP_ROWS) {
-        Terrain t   = s_map[r][col];
-        int     run = 1;
-        while (r + run < MAP_ROWS && s_map[r + run][col] == t) run++;
-        if (run >= 3) {
-            add_connection(t, run >= 5 ? 2 : 1);
-            /* replace matched tiles in-place with new random terrain */
-            for (int k = 0; k < run; k++) {
-                if (s_flash_count < MAX_FLASH_CELLS) {
-                    s_flash_col[s_flash_count] = col;
-                    s_flash_row[s_flash_count] = r + k;
-                    s_flash_count++;
-                }
-                s_map[r + k][col] = random_different_terrain(t);
-            }
-        }
-        r += run;
-    }
 }
 
 static void scan_matches(void)
 {
-    for (int i = 0; i < s_scanned_col_count; i++)
-        scan_line_vertical(s_scanned_cols[i]);
-    for (int i = 0; i < s_scanned_row_count; i++)
-        scan_line_horizontal(s_scanned_rows[i]);
+    sync_board();
+
+    MatchResult result = {0};
+    find_matches_in_region(&s_board, s_patterns, PATTERN_COUNT, &result,
+                           s_scanned_cols, s_scanned_col_count,
+                           s_scanned_rows, s_scanned_row_count);
+
+    for (int m = 0; m < result.count; m++) {
+        MatchEntry *e = &result.entries[m];
+        const Pattern *p = &s_patterns[e->pattern_index];
+
+        Terrain t = s_map[e->y][e->x];
+        add_connection(t, p->cell_count >= 5 ? 2 : 1);
+
+        for (int i = 0; i < p->cell_count; i++) {
+            int cx = e->x + p->cells[i].dx;
+            int cy = e->y + p->cells[i].dy;
+            if (s_flash_count < MAX_FLASH_CELLS) {
+                s_flash_col[s_flash_count] = cx;
+                s_flash_row[s_flash_count] = cy;
+                s_flash_count++;
+            }
+            s_map[cy][cx] = random_different_terrain(t);
+        }
+    }
 }
 
 static void bank_connections(void)
@@ -354,6 +351,54 @@ static void end_turn(void)
 }
 
 /* ------------------------------------------------------------- map generation */
+
+static void init_patterns(void)
+{
+    /* H5: 5 horizontal same-type (higher reward) */
+    s_patterns[0] = (Pattern){
+        .cell_count = 5, .anchor_index = 0,
+        .min_dx = 0, .max_dx = 4, .min_dy = 0, .max_dy = 0,
+        .cells = {
+            { 0, 0, COND_ANY,            0, 0 },
+            { 1, 0, COND_SAME_AS_ANCHOR, 0, 0 },
+            { 2, 0, COND_SAME_AS_ANCHOR, 0, 0 },
+            { 3, 0, COND_SAME_AS_ANCHOR, 0, 0 },
+            { 4, 0, COND_SAME_AS_ANCHOR, 0, 0 },
+        }
+    };
+    /* V5: 5 vertical same-type (higher reward) */
+    s_patterns[1] = (Pattern){
+        .cell_count = 5, .anchor_index = 0,
+        .min_dx = 0, .max_dx = 0, .min_dy = 0, .max_dy = 4,
+        .cells = {
+            { 0, 0, COND_ANY,            0, 0 },
+            { 0, 1, COND_SAME_AS_ANCHOR, 0, 0 },
+            { 0, 2, COND_SAME_AS_ANCHOR, 0, 0 },
+            { 0, 3, COND_SAME_AS_ANCHOR, 0, 0 },
+            { 0, 4, COND_SAME_AS_ANCHOR, 0, 0 },
+        }
+    };
+    /* H3: 3 horizontal same-type */
+    s_patterns[2] = (Pattern){
+        .cell_count = 3, .anchor_index = 0,
+        .min_dx = 0, .max_dx = 2, .min_dy = 0, .max_dy = 0,
+        .cells = {
+            { 0, 0, COND_ANY,            0, 0 },
+            { 1, 0, COND_SAME_AS_ANCHOR, 0, 0 },
+            { 2, 0, COND_SAME_AS_ANCHOR, 0, 0 },
+        }
+    };
+    /* V3: 3 vertical same-type */
+    s_patterns[3] = (Pattern){
+        .cell_count = 3, .anchor_index = 0,
+        .min_dx = 0, .max_dx = 0, .min_dy = 0, .max_dy = 2,
+        .cells = {
+            { 0, 0, COND_ANY,            0, 0 },
+            { 0, 1, COND_SAME_AS_ANCHOR, 0, 0 },
+            { 0, 2, COND_SAME_AS_ANCHOR, 0, 0 },
+        }
+    };
+}
 
 static void generate_map(void)
 {
@@ -722,6 +767,7 @@ static void draw_drawer(void)
 
 static void RealmWalkInit(void)
 {
+    init_patterns();
     generate_map();
 
     s_hero_col = MAP_COLS / 2;
