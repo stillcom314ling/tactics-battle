@@ -655,9 +655,12 @@ static void draw_map_tiles(void)
     int vr = vis_rows();
 
     /* Pass 1: draw individual terrain tiles (skip cells that belong to a
-     * structure — those are rendered as one large tile in pass 2). */
-    for (int row = s_vp_row; row < s_vp_row + vr && row < MAP_ROWS; row++) {
-        for (int col = s_vp_col; col < s_vp_col + vc && col < MAP_COLS; col++) {
+     * structure — those are rendered as one large tile in pass 2).
+     * Expand loop by 1 cell each side to cover fractional viewport lag. */
+    for (int row = s_vp_row - 1; row < s_vp_row + vr + 1 && row < MAP_ROWS; row++) {
+        if (row < 0) continue;
+        for (int col = s_vp_col - 1; col < s_vp_col + vc + 1 && col < MAP_COLS; col++) {
+            if (col < 0) continue;
             if (col == s_hero_col && row == s_hero_row) continue;
             if (s_cell_struct[row][col] >= 0) continue;
             if (s_cell_flying_dst[row][col]) continue;   /* animated tile en-route */
@@ -676,9 +679,9 @@ static void draw_map_tiles(void)
     /* Pass 2: draw each structure as a single merged rectangle */
     for (int i = 0; i < s_structure_count; i++) {
         Structure *s = &s_structures[i];
-        /* cull off-screen */
-        if (s->col + s->w <= s_vp_col || s->col >= s_vp_col + vc) continue;
-        if (s->row + s->h <= s_vp_row || s->row >= s_vp_row + vr) continue;
+        /* cull off-screen (expanded by 1 to match tile loop) */
+        if (s->col + s->w <= s_vp_col - 1 || s->col >= s_vp_col + vc + 1) continue;
+        if (s->row + s->h <= s_vp_row - 1 || s->row >= s_vp_row + vr + 1) continue;
 
         int sx = (int)((s->col - s_vp_vis_col) * ts);
         int sy = (int)((s->row - s_vp_vis_row) * ts);
