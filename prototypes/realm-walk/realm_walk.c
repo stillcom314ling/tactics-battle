@@ -109,6 +109,8 @@ static int  s_scanned_col_count;
 static int  s_scanned_row_count;
 
 /* UI */
+static bool  s_hud_open;
+static float s_hud_t;       /* 0 = closed, 1 = open */
 static bool  s_legend_open;
 static float s_legend_t;    /* 0 = closed, 1 = open */
 static float s_scan_flash;  /* counts down from SCAN_FLASH_SECS */
@@ -200,6 +202,26 @@ static Vector2 tile_center_screen(int map_col, int map_row)
         (float)((map_col - s_vp_col) * ts + ts / 2),
         (float)((map_row - s_vp_row) * ts + ts / 2),
     };
+}
+
+/* HUD tab: compact strip pinned to the top of the screen */
+static Rectangle hud_tab_rect(void)
+{
+    int sw    = GetScreenWidth();
+    int sh    = GetScreenHeight();
+    int tab_h = sh * 6 / 100;
+    return (Rectangle){ 0, 0, (float)sw, (float)tab_h };
+}
+
+/* HUD body: slides down from below the tab when open */
+static Rectangle hud_body_rect(void)
+{
+    int sw     = GetScreenWidth();
+    int sh     = GetScreenHeight();
+    int tab_h  = sh *  6 / 100;
+    int body_h = sh * 22 / 100;
+    float y = (float)tab_h + (s_hud_t - 1.0f) * (float)body_h;
+    return (Rectangle){ 0, y, (float)sw, (float)body_h };
 }
 
 /* Legend tab: fixed strip at the very bottom of the screen */
@@ -634,6 +656,12 @@ static void on_up(Vector2 pos)
         return;
     }
 
+    /* HUD tab toggle */
+    if (CheckCollisionPointRec(pos, hud_tab_rect())) {
+        s_hud_open = !s_hud_open;
+        return;
+    }
+
     /* legend tab toggle */
     if (CheckCollisionPointRec(pos, legend_tab_rect())) {
         s_legend_open = !s_legend_open;
@@ -812,54 +840,122 @@ static void draw_hero(void)
 static void draw_timer_bar(void)
 {
     if (s_phase != PHASE_DRAGGING) return;
-    int   sw    = GetScreenWidth();
-    int   sh    = GetScreenHeight();
-    int   top   = sh * 7 / 100;          /* sits just below resource strip */
-    int   bh    = sh / 60;
-    float frac  = s_turn_timer / TURN_SECS;
-    Color col   = frac > 0.57f ? (Color){  80, 200,  80, 230 }
-                : frac > 0.28f ? (Color){ 220, 200,  60, 230 }
-                               : (Color){ 220,  60,  60, 230 };
-    /* filled portion */
+    int   sw   = GetScreenWidth();
+    int   sh   = GetScreenHeight();
+    int   top  = sh * 6 / 100;   /* always just below the HUD tab */
+    int   bh   = sh / 60;
+    float frac = s_turn_timer / TURN_SECS;
+    Color col  = frac > 0.57f ? (Color){  80, 200,  80, 230 }
+               : frac > 0.28f ? (Color){ 220, 200,  60, 230 }
+                              : (Color){ 220,  60,  60, 230 };
     DrawRectangle(0, top, (int)((float)sw * frac), bh, col);
-    /* depleted portion */
-    DrawRectangle((int)((float)sw * frac), top, sw - (int)((float)sw * frac), bh,
+    DrawRectangle((int)((float)sw * frac), top,
+                  sw - (int)((float)sw * frac), bh,
                   (Color){ 50, 50, 50, 180 });
 }
 
 static void draw_resource_strip(void)
 {
-    int sw      = GetScreenWidth();
-    int sh      = GetScreenHeight();
-    int strip_h = sh * 7 / 100;
-    int pad     = sw / 30;
-    DrawRectangle(0, 0, sw, strip_h, (Color){ 20, 20, 25, 210 });
+    int sw  = GetScreenWidth();
+    int sh  = GetScreenHeight();
+    int pad = sw / 30;
 
-    int fs = strip_h * 50 / 100;
+    /* --- body slides down from below the tab --- */
+    if (s_hud_t > 0.02f) {
+        Rectangle dr = hud_body_rect();
+        DrawRectangleRec(dr, (Color){ 20, 22, 30, 240 });
+        DrawRectangleLinesEx(dr, 1.5f, (Color){ 60, 75, 100, 200 });
 
-    /* Score — left */
-    char score_buf[32];
-    snprintf(score_buf, sizeof(score_buf), "Score  %d", s_score);
+        if (s_hud_t > 0.3f) {
+            int bfs = (int)(dr.height * 0.26f);
+            if (bfs < 14) bfs = 14;
+            int row1 = (int)(dr.y + dr.height * 0.15f);
+            int row2 = (int)(dr.y + dr.height * 0.55f);
+
+            /* Score */
+            char score_buf[32];
+            snprintf(score_buf, sizeof(score_buf), "Score   %d", s_score);
+            Color sc = (s_score >= SCORE_GOAL) ? (Color){ 100, 240, 100, 255 }
+                                               : (Color){ 255, 215,  70, 255 };
+            DrawText(score_buf, pad, row1, bfs, sc);
+
+            /* Goal */
+            char goal_buf[32];
+            snprintf(goal_buf, sizeof(goal_buf), "Goal    %d", SCORE_GOAL);
+            int gw = MeasureText(goal_buf, bfs);
+            DrawText(goal_buf, (sw - gw) / 2, row1, bfs,
+                     (Color){ 120, 130, 150, 210 });
+
+            /* Turns */
+            char turn_buf[32];
+            snprintf(turn_buf, sizeof(turn_buf), "Turn    %d / %d",
+                     s_turn_count, TURNS_LIMIT);
+            int tw = MeasureText(turn_buf, bfs);
+            int turns_left = TURNS_LIMIT - s_turn_count;
+            Color tc = (turns_left <= 0)
+                           ? (Color){ 255,  80,  80, 255 }
+                       : (turns_left <= TURNS_LIMIT * 3 / 10)
+                           ? (Color){ 255, 160,  60, 255 }
+                       :   (Color){ 200, 200, 200, 220 };
+            DrawText(turn_buf, sw - tw - pad, row1, bfs, tc);
+
+            /* Progress bar toward goal */
+            float prog = (float)s_score / (float)SCORE_GOAL;
+            if (prog > 1.0f) prog = 1.0f;
+            int bar_x = pad;
+            int bar_w = sw - pad * 2;
+            int bar_h = sh * 3 / 100;
+            DrawRectangle(bar_x, row2, bar_w, bar_h,
+                          (Color){ 40, 45, 55, 220 });
+            DrawRectangle(bar_x, row2, (int)(bar_w * prog), bar_h,
+                          (Color){ 255, 215, 70, 220 });
+            DrawRectangleLinesEx(
+                (Rectangle){ (float)bar_x, (float)row2,
+                             (float)bar_w, (float)bar_h },
+                1.0f, (Color){ 80, 90, 110, 200 });
+
+            /* progress label */
+            char prog_buf[32];
+            snprintf(prog_buf, sizeof(prog_buf), "%d%%",
+                     (int)(prog * 100.0f));
+            int pfs = bar_h * 80 / 100;
+            if (pfs < 10) pfs = 10;
+            int pw = MeasureText(prog_buf, pfs);
+            DrawText(prog_buf, (sw - pw) / 2,
+                     row2 + (bar_h - pfs) / 2,
+                     pfs, (Color){ 20, 20, 20, 200 });
+        }
+    }
+
+    /* --- always-visible tab --- */
+    Rectangle tab   = hud_tab_rect();
+    int       tab_h = (int)tab.height;
+    int       fs    = tab_h * 46 / 100;
+    DrawRectangleRec(tab, (Color){ 20, 22, 30, 220 });
+    DrawLine(0, tab_h, sw, tab_h, (Color){ 60, 75, 100, 180 });
+
+    /* compact summary: Score left, Turn right, arrow centre */
+    char score_buf[24];
+    snprintf(score_buf, sizeof(score_buf), "%d", s_score);
     Color sc = (s_score >= SCORE_GOAL) ? (Color){ 100, 240, 100, 255 }
-                                       : (Color){ 255, 215, 70, 255 };
-    DrawText(score_buf, pad, (strip_h - fs) / 2, fs, sc);
+                                       : (Color){ 255, 215,  70, 255 };
+    DrawText(score_buf, pad, (tab_h - fs) / 2, fs, sc);
 
-    /* Goal — centre */
-    char goal_buf[32];
-    snprintf(goal_buf, sizeof(goal_buf), "Goal  %d", SCORE_GOAL);
-    int gw = MeasureText(goal_buf, fs);
-    DrawText(goal_buf, (sw - gw) / 2, (strip_h - fs) / 2, fs,
-             (Color){ 120, 130, 150, 210 });
-
-    /* Turns — right, colour-coded */
-    char turn_buf[32];
-    snprintf(turn_buf, sizeof(turn_buf), "Turn  %d / %d", s_turn_count, TURNS_LIMIT);
+    char turn_buf[24];
+    snprintf(turn_buf, sizeof(turn_buf), "%d/%d", s_turn_count, TURNS_LIMIT);
     int tw = MeasureText(turn_buf, fs);
     int turns_left = TURNS_LIMIT - s_turn_count;
-    Color tc = (turns_left <= 0)                    ? (Color){ 255,  80,  80, 255 }
-             : (turns_left <= TURNS_LIMIT * 3 / 10) ? (Color){ 255, 160,  60, 255 }
-             :                                         (Color){ 200, 200, 200, 220 };
-    DrawText(turn_buf, sw - tw - pad, (strip_h - fs) / 2, fs, tc);
+    Color tc = (turns_left <= 0)
+                   ? (Color){ 255,  80,  80, 255 }
+               : (turns_left <= TURNS_LIMIT * 3 / 10)
+                   ? (Color){ 255, 160,  60, 255 }
+               :   (Color){ 200, 200, 200, 220 };
+    DrawText(turn_buf, sw - tw - pad, (tab_h - fs) / 2, fs, tc);
+
+    const char *arrow = s_hud_open ? "^" : "v";
+    int aw = MeasureText(arrow, fs);
+    DrawText(arrow, (sw - aw) / 2, (tab_h - fs) / 2, fs,
+             (Color){ 160, 160, 160, 200 });
 }
 
 /* Draw a mini flat terrain grid for legend entries. */
@@ -1058,6 +1154,8 @@ static void RealmWalkInit(void)
 
     s_flash_count   = 0;
     s_move_cd       = 0.0f;
+    s_hud_open      = false;
+    s_hud_t         = 0.0f;
     s_legend_open   = false;
     s_legend_t      = 0.0f;
     s_prev_tc       = 0;
@@ -1107,7 +1205,10 @@ static void RealmWalkUpdate(float dt)
         }
     }
 
-    /* legend panel animation */
+    /* HUD + legend panel animations */
+    float hud_target = s_hud_open ? 1.0f : 0.0f;
+    s_hud_t += (hud_target - s_hud_t) * fminf(LEGEND_SPEED * dt, 1.0f);
+
     float leg_target = s_legend_open ? 1.0f : 0.0f;
     s_legend_t += (leg_target - s_legend_t) * fminf(LEGEND_SPEED * dt, 1.0f);
 
