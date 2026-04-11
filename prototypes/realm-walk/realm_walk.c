@@ -32,16 +32,16 @@
 
 /* ---- scoring constants ---- */
 #define PT_TRAIL_STEP    1           /* points per trail tile walked    */
-#define PT_FARM          8           /* Farm (2×2 Plains)               */
-#define PT_DENSE_FOREST  10          /* Dense Forest (2×2 Forest)       */
-#define PT_WHEAT_FIELD   6           /* Wheat Field (1×3 Plains)        */
-#define PT_QUARRY        8           /* Quarry (1×3 Mountain)           */
-#define PT_ROAD          7           /* Road (1×3 City)                 */
-#define PT_RIVER         9           /* River (1×4 Water)               */
-#define PT_LUMBER_CAMP   14          /* Lumber Camp (3×3 City+Forest)   */
-#define PT_CASTLE        25          /* Castle (3×3 Mountain+Water)     */
+#define PT_WHEAT_FIELD   4           /* Wheat Field (1×3 Plains)        */
+#define PT_ROAD          5           /* Road (1×3 City)                 */
+#define PT_FARM          6           /* Farm (2×2 Plains)               */
+#define PT_QUARRY        6           /* Quarry (1×3 Mountain)           */
+#define PT_RIVER         7           /* River (1×4 Water)               */
+#define PT_DENSE_FOREST  8           /* Dense Forest (2×2 Forest)       */
+#define PT_LUMBER_CAMP   11          /* Lumber Camp (3×3 City+Forest)   */
+#define PT_CASTLE        18          /* Castle (3×3 Mountain+Water)     */
 #define TURNS_LIMIT      15          /* turns before game ends          */
-#define SCORE_GOAL       450         /* score needed to win             */
+#define SCORE_GOAL       600         /* score needed to win             */
 #define POPUP_LIFETIME   1.4f        /* seconds a score popup lives     */
 #define POPUP_FLOAT      2.2f        /* cells upward over its lifetime  */
 #define MAX_SCORE_POPUPS 16
