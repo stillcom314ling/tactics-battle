@@ -254,9 +254,6 @@ static bool check_scroll_trigger(void)
     return (s_vp_col != old_vp_col || s_vp_row != old_vp_row);
 }
 
-/* Forward declarations for structure-aware movement */
-static void detect_structures(void);
-
 /* Move a structure as a unit. Hero is about to enter cell (new_col, new_row),
  * which is part of structure si. The structure shifts opposite to the hero's
  * movement direction by its own width/height. The terrain currently at the
@@ -300,6 +297,15 @@ static bool shift_structure(int new_col, int new_row, int si)
             s_map[nr + r][nc + c]          = old_struct[r * s->w + c];
         }
 
+    /* Move the structure's cell-index footprint. Shift is always ±w or ±h,
+     * so the old and new rectangles never overlap — safe to clear then set. */
+    for (int r = 0; r < s->h; r++)
+        for (int c = 0; c < s->w; c++)
+            s_cell_struct[s->row + r][s->col + c] = -1;
+    for (int r = 0; r < s->h; r++)
+        for (int c = 0; c < s->w; c++)
+            s_cell_struct[nr + r][nc + c] = si;
+
     s->col = nc;
     s->row = nr;
     return true;
@@ -338,8 +344,9 @@ static bool advance_hero(int new_col, int new_row)
 
     record_visited(new_col, new_row);
 
-    /* Board changed — re-detect structures so new formations are tracked. */
-    detect_structures();
+    /* New merges resolve at end of turn, not on every step. Existing
+     * structures are still tracked because shift_structure() updates
+     * s_cell_struct in place. */
 
     return check_scroll_trigger();
 }
