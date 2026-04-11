@@ -10,7 +10,7 @@
 #define MAP_COLS        30
 #define MAP_ROWS        20
 #define SCROLL_DEAD_ZONE 2      /* hero cells from vp center before scroll */
-#define TURN_SECS        7.0f
+#define TURN_SECS        5.0f
 #define MAX_TRAIL       (MAP_COLS + MAP_ROWS)
 #define MOVE_COOLDOWN    0.12f  /* seconds between hero steps while dragging */
 #define LEGEND_SPEED     8.0f   /* legend panel animation speed             */
@@ -32,11 +32,16 @@
 
 /* ---- scoring constants ---- */
 #define PT_TRAIL_STEP    1           /* points per trail tile walked    */
-#define PT_DENSE_FOREST  8           /* Dense Forest contributes/turn   */
-#define PT_FARM          6           /* Farm contributes/turn           */
-#define PT_CASTLE        20          /* Castle contributes/turn         */
-#define TURNS_LIMIT      20          /* turns before game ends          */
-#define SCORE_GOAL       300         /* score needed to win             */
+#define PT_FARM          8           /* Farm (2×2 Plains)               */
+#define PT_DENSE_FOREST  10          /* Dense Forest (2×2 Forest)       */
+#define PT_WHEAT_FIELD   6           /* Wheat Field (1×3 Plains)        */
+#define PT_QUARRY        8           /* Quarry (1×3 Mountain)           */
+#define PT_ROAD          7           /* Road (1×3 City)                 */
+#define PT_RIVER         9           /* River (1×4 Water)               */
+#define PT_LUMBER_CAMP   14          /* Lumber Camp (3×3 City+Forest)   */
+#define PT_CASTLE        25          /* Castle (3×3 Mountain+Water)     */
+#define TURNS_LIMIT      15          /* turns before game ends          */
+#define SCORE_GOAL       450         /* score needed to win             */
 #define POPUP_LIFETIME   1.4f        /* seconds a score popup lives     */
 #define POPUP_FLOAT      2.2f        /* cells upward over its lifetime  */
 #define MAX_SCORE_POPUPS 16
@@ -56,9 +61,14 @@ typedef enum { PHASE_IDLE, PHASE_DRAGGING, PHASE_SCANNING } Phase;
 
 typedef enum {
     STRUCT_NONE = 0,
-    STRUCT_DENSE_FOREST,  /* 2x2 forest */
-    STRUCT_FARM,          /* 2x2 plains */
-    STRUCT_CASTLE,        /* 3x3: mountain center + 8 water ring */
+    STRUCT_DENSE_FOREST,  /* 2×2 Forest                       */
+    STRUCT_FARM,          /* 2×2 Plains                       */
+    STRUCT_CASTLE,        /* 3×3 Mountain center + Water ring */
+    STRUCT_LUMBER_CAMP,   /* 3×3 City center + Forest ring    */
+    STRUCT_RIVER,         /* 1×4 Water (H or V)               */
+    STRUCT_WHEAT_FIELD,   /* 1×3 Plains (H or V)              */
+    STRUCT_ROAD,          /* 1×3 City (H or V)                */
+    STRUCT_QUARRY,        /* 1×3 Mountain (H or V)            */
     STRUCT_TYPE_COUNT
 } StructureType;
 
@@ -160,14 +170,20 @@ static const Color TERRAIN_COLOR[TERRAIN_COUNT] = {
 static const char TERRAIN_LETTER[TERRAIN_COUNT] = { 'P', 'F', 'M', 'C', 'W' };
 
 static const Color STRUCT_COLOR[STRUCT_TYPE_COUNT] = {
-    {   0,   0,   0,   0 }, /* STRUCT_NONE          – unused              */
-    {  20,  80,  30, 255 }, /* STRUCT_DENSE_FOREST  – very dark green     */
-    { 230, 200,  90, 255 }, /* STRUCT_FARM          – wheat / straw       */
-    { 200, 200, 220, 255 }, /* STRUCT_CASTLE        – silver stone        */
+    {   0,   0,   0,   0 }, /* NONE          */
+    {  20,  80,  30, 255 }, /* DENSE_FOREST  – dark green  */
+    { 230, 200,  90, 255 }, /* FARM          – straw       */
+    { 200, 200, 220, 255 }, /* CASTLE        – silver      */
+    {  70, 130,  60, 255 }, /* LUMBER_CAMP   – mid green   */
+    {  40, 100, 200, 255 }, /* RIVER         – deep blue   */
+    { 200, 210, 100, 255 }, /* WHEAT_FIELD   – pale gold   */
+    { 190, 130,  60, 255 }, /* ROAD          – earthy      */
+    { 110, 110, 120, 255 }, /* QUARRY        – stone grey  */
 };
 
 static const char *STRUCT_LABEL[STRUCT_TYPE_COUNT] = {
-    "", "Dense Forest", "Farm", "Castle"
+    "", "Dense Forest", "Farm", "Castle",
+    "Lumber Camp", "River", "Wheat Field", "Road", "Quarry"
 };
 
 /* ---------------------------------------------------------- layout helpers */
@@ -450,50 +466,86 @@ static bool try_2x2(StructureType type, Terrain t, int c, int r)
     return add_structure(type, c, r, 2, 2);
 }
 
-static bool try_castle(int cc, int cr)
+/* 3×3 center+ring detector. Center tile = center_t, all 8 neighbours = ring_t. */
+static bool try_ring_3x3(StructureType type,
+                          Terrain center_t, Terrain ring_t,
+                          int cc, int cr)
 {
-    /* Mountain at centre (cc, cr), 8 water neighbours. */
     if (cc < 1 || cc >= MAP_COLS - 1) return false;
     if (cr < 1 || cr >= MAP_ROWS - 1) return false;
-
-    if (s_map[cr][cc] != TERRAIN_MOUNTAIN) return false;
-
-    for (int dr = -1; dr <= 1; dr++) {
+    if (s_map[cr][cc] != center_t) return false;
+    for (int dr = -1; dr <= 1; dr++)
         for (int dc = -1; dc <= 1; dc++) {
             if (dc == 0 && dr == 0) continue;
-            if (s_map[cr + dr][cc + dc] != TERRAIN_WATER) return false;
+            if (s_map[cr + dr][cc + dc] != ring_t) return false;
         }
-    }
-
-    int ac = cc - 1;
-    int ar = cr - 1;
+    int ac = cc - 1, ar = cr - 1;
     for (int r = 0; r < 3; r++)
         for (int c = 0; c < 3; c++) {
-            if (s_cell_struct[ar + r][ac + c] >= 0)   return false;
-            if (cell_has_hero(ac + c, ar + r))        return false;
+            if (s_cell_struct[ar + r][ac + c] >= 0) return false;
+            if (cell_has_hero(ac + c, ar + r))      return false;
         }
+    return add_structure(type, ac, ar, 3, 3);
+}
 
-    return add_structure(STRUCT_CASTLE, ac, ar, 3, 3);
+static bool try_castle(int cc, int cr)
+{
+    return try_ring_3x3(STRUCT_CASTLE, TERRAIN_MOUNTAIN, TERRAIN_WATER, cc, cr);
+}
+
+/* Generic linear (row or column) structure detector. */
+static bool try_row(StructureType type, Terrain t,
+                    int c, int r, int w, int h)
+{
+    if (c + w > MAP_COLS || r + h > MAP_ROWS) return false;
+    for (int dr = 0; dr < h; dr++)
+        for (int dc = 0; dc < w; dc++) {
+            if (s_cell_struct[r + dr][c + dc] >= 0) return false;
+            if (s_map[r + dr][c + dc] != t)         return false;
+            if (cell_has_hero(c + dc, r + dr))      return false;
+        }
+    return add_structure(type, c, r, w, h);
 }
 
 static void detect_structures(void)
 {
     clear_structures();
 
-    /* Castles first — they're the largest and most specific. */
+    /* 3×3 ring patterns first — largest and most specific */
     for (int r = 1; r < MAP_ROWS - 1; r++)
-        for (int c = 1; c < MAP_COLS - 1; c++)
+        for (int c = 1; c < MAP_COLS - 1; c++) {
             try_castle(c, r);
+            try_ring_3x3(STRUCT_LUMBER_CAMP, TERRAIN_CITY, TERRAIN_FOREST, c, r);
+        }
 
-    /* 2x2 dense forest */
+    /* 2×2 homogeneous blocks */
     for (int r = 0; r < MAP_ROWS - 1; r++)
-        for (int c = 0; c < MAP_COLS - 1; c++)
+        for (int c = 0; c < MAP_COLS - 1; c++) {
             try_2x2(STRUCT_DENSE_FOREST, TERRAIN_FOREST, c, r);
+            try_2x2(STRUCT_FARM,         TERRAIN_PLAINS, c, r);
+        }
 
-    /* 2x2 farm */
-    for (int r = 0; r < MAP_ROWS - 1; r++)
-        for (int c = 0; c < MAP_COLS - 1; c++)
-            try_2x2(STRUCT_FARM, TERRAIN_PLAINS, c, r);
+    /* River: 1×4 Water — scan before 1×3 to prevent subset formations */
+    for (int r = 0; r < MAP_ROWS; r++)
+        for (int c = 0; c <= MAP_COLS - 4; c++)
+            try_row(STRUCT_RIVER, TERRAIN_WATER, c, r, 4, 1);
+    for (int r = 0; r <= MAP_ROWS - 4; r++)
+        for (int c = 0; c < MAP_COLS; c++)
+            try_row(STRUCT_RIVER, TERRAIN_WATER, c, r, 1, 4);
+
+    /* 1×3 linear patterns — horizontal then vertical */
+    for (int r = 0; r < MAP_ROWS; r++)
+        for (int c = 0; c <= MAP_COLS - 3; c++) {
+            try_row(STRUCT_WHEAT_FIELD, TERRAIN_PLAINS,   c, r, 3, 1);
+            try_row(STRUCT_QUARRY,      TERRAIN_MOUNTAIN, c, r, 3, 1);
+            try_row(STRUCT_ROAD,        TERRAIN_CITY,     c, r, 3, 1);
+        }
+    for (int r = 0; r <= MAP_ROWS - 3; r++)
+        for (int c = 0; c < MAP_COLS; c++) {
+            try_row(STRUCT_WHEAT_FIELD, TERRAIN_PLAINS,   c, r, 1, 3);
+            try_row(STRUCT_QUARRY,      TERRAIN_MOUNTAIN, c, r, 1, 3);
+            try_row(STRUCT_ROAD,        TERRAIN_CITY,     c, r, 1, 3);
+        }
 }
 
 static void scan_matches(void)
@@ -548,6 +600,11 @@ static void award_turn_score(void)
             case STRUCT_DENSE_FOREST: pts = PT_DENSE_FOREST; break;
             case STRUCT_FARM:         pts = PT_FARM;         break;
             case STRUCT_CASTLE:       pts = PT_CASTLE;       break;
+            case STRUCT_LUMBER_CAMP:  pts = PT_LUMBER_CAMP;  break;
+            case STRUCT_RIVER:        pts = PT_RIVER;        break;
+            case STRUCT_WHEAT_FIELD:  pts = PT_WHEAT_FIELD;  break;
+            case STRUCT_ROAD:         pts = PT_ROAD;         break;
+            case STRUCT_QUARRY:       pts = PT_QUARRY;       break;
             default: break;
         }
         if (pts > 0) {
@@ -1027,32 +1084,62 @@ static void draw_legend(void)
 
     if (s_legend_t < 0.25f) return;
 
+    /* ---- diagram cell data ---- */
     static const Terrain s_forest_cells[4] = {
-        TERRAIN_FOREST,   TERRAIN_FOREST,
-        TERRAIN_FOREST,   TERRAIN_FOREST,
+        TERRAIN_FOREST, TERRAIN_FOREST,
+        TERRAIN_FOREST, TERRAIN_FOREST,
     };
     static const Terrain s_farm_cells[4] = {
-        TERRAIN_PLAINS,   TERRAIN_PLAINS,
-        TERRAIN_PLAINS,   TERRAIN_PLAINS,
+        TERRAIN_PLAINS, TERRAIN_PLAINS,
+        TERRAIN_PLAINS, TERRAIN_PLAINS,
     };
     static const Terrain s_castle_cells[9] = {
         TERRAIN_WATER,    TERRAIN_WATER,    TERRAIN_WATER,
         TERRAIN_WATER,    TERRAIN_MOUNTAIN, TERRAIN_WATER,
         TERRAIN_WATER,    TERRAIN_WATER,    TERRAIN_WATER,
     };
+    static const Terrain s_lumber_cells[9] = {
+        TERRAIN_FOREST, TERRAIN_FOREST, TERRAIN_FOREST,
+        TERRAIN_FOREST, TERRAIN_CITY,   TERRAIN_FOREST,
+        TERRAIN_FOREST, TERRAIN_FOREST, TERRAIN_FOREST,
+    };
+    static const Terrain s_river_cells[4] = {
+        TERRAIN_WATER, TERRAIN_WATER, TERRAIN_WATER, TERRAIN_WATER,
+    };
+    static const Terrain s_wheat_cells[3] = {
+        TERRAIN_PLAINS, TERRAIN_PLAINS, TERRAIN_PLAINS,
+    };
+    static const Terrain s_road_cells[3] = {
+        TERRAIN_CITY, TERRAIN_CITY, TERRAIN_CITY,
+    };
+    static const Terrain s_quarry_cells[3] = {
+        TERRAIN_MOUNTAIN, TERRAIN_MOUNTAIN, TERRAIN_MOUNTAIN,
+    };
 
-    static const char *s_names[4] = {
-        "Dense Forest", "Farm", "Castle", "Trail Step"
+    /* ---- per-row metadata ---- */
+    /* g_cols, g_rows, cells ptr, name, desc, pts, per_turn */
+    static const char *s_names[9] = {
+        "Dense Forest", "Farm", "Castle", "Lumber Camp",
+        "River", "Wheat Field", "Road", "Quarry", "Trail Step"
     };
-    static const char *s_descs[4] = {
-        "2x2 Forest tiles", "2x2 Plains tiles",
-        "Mountain + Water ring", "Each step on trail"
+    static const char *s_descs[9] = {
+        "2x2 Forest", "2x2 Plains", "Mountain+Water ring", "City+Forest ring",
+        "4 Water in a line", "3 Plains in a line",
+        "3 City in a line", "3 Mountain in a line", "Each step on trail"
     };
-    static const int s_pts[4] = {
-        PT_DENSE_FOREST, PT_FARM, PT_CASTLE, PT_TRAIL_STEP
+    static const int s_pts[9] = {
+        PT_DENSE_FOREST, PT_FARM, PT_CASTLE, PT_LUMBER_CAMP,
+        PT_RIVER, PT_WHEAT_FIELD, PT_ROAD, PT_QUARRY, PT_TRAIL_STEP
+    };
+    /* g_cols and g_rows per entry */
+    static const int s_gc[9] = { 2, 2, 3, 3, 4, 3, 3, 3, 1 };
+    static const int s_gr[9] = { 2, 2, 3, 3, 1, 1, 1, 1, 1 };
+    const Terrain *s_cells[9] = {
+        s_forest_cells, s_farm_cells, s_castle_cells, s_lumber_cells,
+        s_river_cells, s_wheat_cells, s_road_cells, s_quarry_cells, NULL
     };
 
-    int n_rows    = 4;
+    int n_rows    = 9;
     int row_h     = (int)(dr.height / (float)n_rows);
     int diagram_w = row_h;
 
@@ -1065,35 +1152,33 @@ static void draw_legend(void)
                      (Color){ 60, 70, 90, 160 });
 
         /* mini diagram */
-        if (i < 3) {
-            int g_cols = (i == 2) ? 3 : 2;
-            int g_rows = (i == 2) ? 3 : 2;
-            int cs = diagram_w / (g_cols + 1);
-            int gx = (int)(dr.x + pad) + (diagram_w - g_cols * cs) / 2;
-            int gy = ry + (row_h - g_rows * cs) / 2;
-            const Terrain *cells = (i == 0) ? s_forest_cells
-                                 : (i == 1) ? s_farm_cells
-                                            : s_castle_cells;
-            draw_legend_grid(gx, gy, cs, cells, g_cols, g_rows);
+        if (s_cells[i] != NULL) {
+            int gc = s_gc[i], gr = s_gr[i];
+            int max_dim = gc > gr ? gc : gr;
+            int cs = diagram_w / (max_dim + 1);
+            if (cs < 4) cs = 4;
+            int gx = (int)(dr.x + pad) + (diagram_w - gc * cs) / 2;
+            int gy = ry + (row_h - gr * cs) / 2;
+            draw_legend_grid(gx, gy, cs, s_cells[i], gc, gr);
         } else {
-            /* trail row: hero glyph placeholder */
+            /* trail: hero glyph */
             int cs = diagram_w / 3;
             int gx = (int)(dr.x + pad) + (diagram_w - cs) / 2;
             int gy = ry + (row_h - cs) / 2;
             DrawRectangle(gx, gy, cs - 1, cs - 1, (Color){ 240, 220, 100, 255 });
             int hfs = cs * 55 / 100;
             if (hfs < 6) hfs = 6;
-            int hw  = MeasureText("H", hfs);
+            int hw = MeasureText("H", hfs);
             DrawText("H", gx + (cs - hw) / 2, gy + (cs - hfs) / 2,
                      hfs, (Color){ 80, 50, 10, 200 });
         }
 
         /* name + description */
-        int text_x = (int)(dr.x + pad + diagram_w + pad);
+        int text_x  = (int)(dr.x + pad + diagram_w + pad);
         int name_fs = row_h * 30 / 100;
         int desc_fs = row_h * 22 / 100;
-        if (name_fs < 12) name_fs = 12;
-        if (desc_fs < 10) desc_fs = 10;
+        if (name_fs < 10) name_fs = 10;
+        if (desc_fs <  8) desc_fs =  8;
 
         DrawText(s_names[i], text_x,
                  ry + (row_h / 2 - name_fs) / 2,
@@ -1102,15 +1187,16 @@ static void draw_legend(void)
                  ry + row_h / 2,
                  desc_fs, (Color){ 140, 150, 170, 200 });
 
-        /* points label — right-aligned */
+        /* pts label right-aligned */
         char pts_buf[24];
         snprintf(pts_buf, sizeof(pts_buf),
-                 (i < 3) ? "+%d pt/turn" : "+%d pt/step", s_pts[i]);
+                 (i < 8) ? "+%d/turn" : "+%d/step", s_pts[i]);
         int   pts_fs = name_fs;
         int   pts_w  = MeasureText(pts_buf, pts_fs);
-        Color pts_c  = (s_pts[i] >= PT_CASTLE)       ? (Color){ 255, 215,  60, 255 }
-                     : (s_pts[i] >= PT_DENSE_FOREST)  ? (Color){ 100, 220, 130, 255 }
-                     :                                   (Color){ 180, 200, 220, 230 };
+        Color pts_c  = (s_pts[i] >= PT_CASTLE)      ? (Color){ 255, 215,  60, 255 }
+                     : (s_pts[i] >= PT_LUMBER_CAMP)  ? (Color){ 160, 240, 140, 255 }
+                     : (s_pts[i] >= PT_DENSE_FOREST) ? (Color){ 100, 220, 130, 255 }
+                     :                                  (Color){ 180, 200, 220, 230 };
         DrawText(pts_buf,
                  (int)(dr.x + dr.width - pad - pts_w),
                  ry + (row_h - pts_fs) / 2,
