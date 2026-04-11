@@ -19,6 +19,19 @@
 #define ACTION_COUNT     4
 #define MAX_FLASH_CELLS  (MAP_COLS * MAP_ROWS)
 
+/* ---- animation constants ---- */
+#define HERO_LERP_SPD        14.0f   /* cells/sec exponential approach  */
+#define VP_LERP_SPD          10.0f   /* viewport pan speed              */
+#define FLY_LERP_SPD         12.0f   /* flying tile slide speed         */
+#define FLY_ARRIVE_DIST      0.08f   /* snap flying tile when this close*/
+#define MAX_FLYING_TILES     8       /* simultaneous displaced tiles    */
+#define BUMP_SCALE_PEAK      1.15f   /* hero landing scale overshoot    */
+#define BUMP_DECAY           18.0f   /* how fast bump scale returns to 1*/
+#define TRAIL_ALPHA_OLD      20      /* alpha of oldest trail tile      */
+#define TRAIL_ALPHA_NEW      120     /* alpha of newest trail tile      */
+#define TRAIL_FADEIN_SECS    0.12f   /* fade-in duration for new tile   */
+#define TRAIL_BORDER_RECENT  3       /* last N trail tiles get a border */
+
 /* ------------------------------------------------------------------- types */
 
 typedef enum {
@@ -62,6 +75,13 @@ typedef struct {
     int           col, row;   /* top-left anchor */
     int           w, h;       /* size in tiles */
 } Structure;
+
+typedef struct {
+    float   vis_col, vis_row;   /* current visual position (float cells) */
+    float   dst_col, dst_row;   /* logical destination cell              */
+    Terrain terrain;
+    bool    active;
+} FlyingTile;
 
 #define MAX_STRUCTURES 32
 
@@ -117,6 +137,14 @@ static Structure s_structures[MAX_STRUCTURES];
 static int       s_structure_count;
 /* per-cell index into s_structures; -1 when not part of a structure */
 static int       s_cell_struct[MAP_ROWS][MAP_COLS];
+
+/* ---- animation state ---- */
+static float s_hero_vis_col, s_hero_vis_row;  /* lerps toward s_hero_col/row */
+static float s_vp_vis_col,   s_vp_vis_row;    /* lerps toward s_vp_col/row   */
+static float s_hero_bump;                      /* 0..0.15, decays after land  */
+static FlyingTile s_flying[MAX_FLYING_TILES];
+static bool       s_cell_flying_dst[MAP_ROWS][MAP_COLS]; /* suppressed cells  */
+static float      s_trail_age[MAX_TRAIL];      /* seconds since tile placed   */
 
 /* -------------------------------------------------------------- data tables */
 
@@ -330,17 +358,36 @@ static bool advance_hero(int new_col, int new_row)
          * block swap already put the displaced terrain into the old space. */
     } else {
         /* Normal single-tile displacement */
-        s_map[s_hero_row][s_hero_col] = s_map[new_row][new_col];
+        Terrain displaced = s_map[new_row][new_col];
+        s_map[s_hero_row][s_hero_col] = displaced;
+
+        /* Spawn flying tile: slides from hero's destination back to vacated cell */
+        for (int _fi = 0; _fi < MAX_FLYING_TILES; _fi++) {
+            if (!s_flying[_fi].active) {
+                s_flying[_fi] = (FlyingTile){
+                    .active  = true,
+                    .terrain = displaced,
+                    .vis_col = (float)new_col,
+                    .vis_row = (float)new_row,
+                    .dst_col = (float)s_hero_col,
+                    .dst_row = (float)s_hero_row,
+                };
+                s_cell_flying_dst[s_hero_row][s_hero_col] = true;
+                break;
+            }
+        }
     }
 
     if (s_trail_len < MAX_TRAIL) {
         s_trail_col[s_trail_len] = new_col;
         s_trail_row[s_trail_len] = new_row;
+        s_trail_age[s_trail_len] = 0.0f;
         s_trail_len++;
     }
 
     s_hero_col = new_col;
     s_hero_row = new_row;
+    s_hero_bump = BUMP_SCALE_PEAK - 1.0f;
 
     record_visited(new_col, new_row);
 
@@ -613,8 +660,9 @@ static void draw_map_tiles(void)
         for (int col = s_vp_col; col < s_vp_col + vc && col < MAP_COLS; col++) {
             if (col == s_hero_col && row == s_hero_row) continue;
             if (s_cell_struct[row][col] >= 0) continue;
-            int   sx = (col - s_vp_col) * ts;
-            int   sy = (row - s_vp_row) * ts;
+            if (s_cell_flying_dst[row][col]) continue;   /* animated tile en-route */
+            int   sx = (int)((col - s_vp_vis_col) * ts);
+            int   sy = (int)((row - s_vp_vis_row) * ts);
             Color c  = TERRAIN_COLOR[s_map[row][col]];
             DrawRectangle(sx, sy, ts - 1, ts - 1, c);
             char letter[2] = { TERRAIN_LETTER[s_map[row][col]], '\0' };
@@ -632,8 +680,8 @@ static void draw_map_tiles(void)
         if (s->col + s->w <= s_vp_col || s->col >= s_vp_col + vc) continue;
         if (s->row + s->h <= s_vp_row || s->row >= s_vp_row + vr) continue;
 
-        int sx = (s->col - s_vp_col) * ts;
-        int sy = (s->row - s_vp_row) * ts;
+        int sx = (int)((s->col - s_vp_vis_col) * ts);
+        int sy = (int)((s->row - s_vp_vis_row) * ts);
         int w  = s->w * ts - 1;
         int h  = s->h * ts - 1;
 
@@ -660,12 +708,29 @@ static void draw_trail(void)
     for (int i = 0; i < s_trail_len; i++) {
         int col = s_trail_col[i];
         int row = s_trail_row[i];
-        /* skip if off-screen */
-        if (col < s_vp_col || col >= s_vp_col + vis_cols()) continue;
-        if (row < s_vp_row || row >= s_vp_row + vis_rows()) continue;
-        int sx = (col - s_vp_col) * ts;
-        int sy = (row - s_vp_row) * ts;
-        DrawRectangle(sx, sy, ts - 1, ts - 1, (Color){ 255, 255, 255, 45 });
+        /* cull using logical vp with ±1 buffer to handle pan lag */
+        if (col < s_vp_col - 1 || col >= s_vp_col + vis_cols() + 1) continue;
+        if (row < s_vp_row - 1 || row >= s_vp_row + vis_rows() + 1) continue;
+        int sx = (int)((col - s_vp_vis_col) * ts);
+        int sy = (int)((row - s_vp_vis_row) * ts);
+
+        /* gradient: i=0 oldest (dim), i=trail_len-1 newest (bright) */
+        float gradient_t = (s_trail_len > 1)
+            ? (float)i / (float)(s_trail_len - 1) : 1.0f;
+        int base_alpha = TRAIL_ALPHA_OLD +
+            (int)((TRAIL_ALPHA_NEW - TRAIL_ALPHA_OLD) * gradient_t);
+        /* fade-in for freshly placed tiles */
+        float fade_frac = fminf(s_trail_age[i] / TRAIL_FADEIN_SECS, 1.0f);
+        int alpha = (int)(base_alpha * fade_frac);
+
+        DrawRectangle(sx, sy, ts - 1, ts - 1,
+                      (Color){ 255, 255, 255, (unsigned char)alpha });
+        /* subtle border on the most recent TRAIL_BORDER_RECENT tiles */
+        if (i >= s_trail_len - TRAIL_BORDER_RECENT) {
+            DrawRectangleLinesEx(
+                (Rectangle){ (float)sx, (float)sy, (float)(ts - 1), (float)(ts - 1) },
+                1.5f, (Color){ 255, 255, 255, (unsigned char)(alpha / 2) });
+        }
     }
 }
 
@@ -688,8 +753,8 @@ static void draw_scan_flash(void)
         int row = s_flash_row[i];
         if (col < s_vp_col || col >= s_vp_col + vc) continue;
         if (row < s_vp_row || row >= s_vp_row + vr) continue;
-        int sx = (col - s_vp_col) * ts;
-        int sy = (row - s_vp_row) * ts;
+        int sx = (int)((col - s_vp_vis_col) * ts);
+        int sy = (int)((row - s_vp_vis_row) * ts);
         /* bright white flash over the replaced tile */
         DrawRectangle(sx, sy, ts - 1, ts - 1, (Color){ 255, 255, 200, a });
         /* sparkle border */
@@ -699,22 +764,51 @@ static void draw_scan_flash(void)
     }
 }
 
-static void draw_hero(void)
+static void draw_flying_tiles(void)
 {
     int ts = tile_px();
-    int sx = (s_hero_col - s_vp_col) * ts;
-    int sy = (s_hero_row - s_vp_row) * ts;
+    int sw = GetScreenWidth(), sh = GetScreenHeight();
+    for (int _fi = 0; _fi < MAX_FLYING_TILES; _fi++) {
+        FlyingTile *ft = &s_flying[_fi];
+        if (!ft->active) continue;
+        int sx = (int)((ft->vis_col - s_vp_vis_col) * ts);
+        int sy = (int)((ft->vis_row - s_vp_vis_row) * ts);
+        if (sx + ts < 0 || sx > sw || sy + ts < 0 || sy > sh) continue;
+        DrawRectangle(sx, sy, ts - 1, ts - 1, TERRAIN_COLOR[ft->terrain]);
+        /* white border signals this tile is in motion */
+        DrawRectangleLinesEx(
+            (Rectangle){ (float)sx, (float)sy, (float)(ts - 1), (float)(ts - 1) },
+            2.0f, (Color){ 255, 255, 255, 160 });
+        char letter[2] = { TERRAIN_LETTER[ft->terrain], '\0' };
+        int  fs = ts * 28 / 100;
+        int  lw = MeasureText(letter, fs);
+        DrawText(letter, sx + (ts - lw) / 2, sy + (ts - fs) / 2,
+                 fs, (Color){ 0, 0, 0, 70 });
+    }
+}
 
-    /* tile fill */
-    DrawRectangle(sx, sy, ts - 1, ts - 1, (Color){ 240, 220, 100, 255 });
-    /* highlight border */
-    DrawRectangleLinesEx(
-        (Rectangle){ (float)sx, (float)sy, (float)(ts - 1), (float)(ts - 1) },
-        2.0f, (Color){ 180, 140, 40, 255 });
-    /* letter */
-    int  fs = ts * 36 / 100;
+static void draw_hero(void)
+{
+    int   ts    = tile_px();
+    float scale = 1.0f + s_hero_bump;
+
+    /* visual float position → pixel center */
+    float cx = (s_hero_vis_col - s_vp_vis_col) * ts + ts * 0.5f;
+    float cy = (s_hero_vis_row - s_vp_vis_row) * ts + ts * 0.5f;
+
+    /* scaled tile dimensions, centered on cx/cy */
+    float w  = (ts - 1) * scale;
+    float h  = (ts - 1) * scale;
+    float sx = cx - w * 0.5f;
+    float sy = cy - h * 0.5f;
+
+    DrawRectangleV((Vector2){ sx, sy }, (Vector2){ w, h },
+                   (Color){ 240, 220, 100, 255 });
+    DrawRectangleLinesEx((Rectangle){ sx, sy, w, h },
+                         2.0f, (Color){ 180, 140, 40, 255 });
+    int  fs = (int)(ts * 36 / 100 * scale);
     int  lw = MeasureText("H", fs);
-    DrawText("H", sx + (ts - 1 - lw) / 2, sy + (ts - 1 - fs) / 2,
+    DrawText("H", (int)(cx - lw * 0.5f), (int)(cy - fs * 0.5f),
              fs, (Color){ 80, 50, 10, 200 });
 }
 
@@ -894,6 +988,17 @@ static void RealmWalkInit(void)
     s_vp_col_prev = s_vp_col;
     s_vp_row_prev = s_vp_row;
 
+    /* animation state — snap visual positions to logical at startup */
+    s_hero_vis_col = (float)s_hero_col;
+    s_hero_vis_row = (float)s_hero_row;
+    s_vp_vis_col   = (float)s_vp_col;
+    s_vp_vis_row   = (float)s_vp_row;
+    s_hero_bump    = 0.0f;
+    for (int _fi = 0; _fi < MAX_FLYING_TILES; _fi++)
+        s_flying[_fi].active = false;
+    memset(s_cell_flying_dst, 0, sizeof(s_cell_flying_dst));
+    memset(s_trail_age, 0, sizeof(s_trail_age));
+
     s_is_dragging       = false;
     s_phase             = PHASE_IDLE;
     s_turn_timer        = TURN_SECS;
@@ -962,6 +1067,45 @@ static void RealmWalkUpdate(float dt)
     /* drawer animation */
     float target = (s_drawer == DRAWER_OPEN) ? 1.0f : 0.0f;
     s_drawer_t  += (target - s_drawer_t) * fminf(DRAWER_SPEED * dt, 1.0f);
+
+    /* ---- animation lerps ---- */
+    {
+        float k_hero = fminf(HERO_LERP_SPD * dt, 1.0f);
+        s_hero_vis_col += ((float)s_hero_col - s_hero_vis_col) * k_hero;
+        s_hero_vis_row += ((float)s_hero_row - s_hero_vis_row) * k_hero;
+
+        float k_vp = fminf(VP_LERP_SPD * dt, 1.0f);
+        s_vp_vis_col += ((float)s_vp_col - s_vp_vis_col) * k_vp;
+        s_vp_vis_row += ((float)s_vp_row - s_vp_vis_row) * k_vp;
+
+        if (s_hero_bump > 0.0f) {
+            s_hero_bump -= BUMP_DECAY * dt;
+            if (s_hero_bump < 0.0f) s_hero_bump = 0.0f;
+        }
+
+        for (int _fi = 0; _fi < MAX_FLYING_TILES; _fi++) {
+            FlyingTile *ft = &s_flying[_fi];
+            if (!ft->active) continue;
+            float k_fly = fminf(FLY_LERP_SPD * dt, 1.0f);
+            ft->vis_col += (ft->dst_col - ft->vis_col) * k_fly;
+            ft->vis_row += (ft->dst_row - ft->vis_row) * k_fly;
+            float dc = ft->vis_col - ft->dst_col;
+            float dr = ft->vis_row - ft->dst_row;
+            if (dc * dc + dr * dr < FLY_ARRIVE_DIST * FLY_ARRIVE_DIST) {
+                ft->active = false;
+                int dst_c = (int)(ft->dst_col + 0.5f);
+                int dst_r = (int)(ft->dst_row + 0.5f);
+                if (dst_c >= 0 && dst_c < MAP_COLS && dst_r >= 0 && dst_r < MAP_ROWS)
+                    s_cell_flying_dst[dst_r][dst_c] = false;
+            }
+        }
+
+        for (int _ti = 0; _ti < s_trail_len; _ti++) {
+            s_trail_age[_ti] += dt;
+            if (s_trail_age[_ti] > TRAIL_FADEIN_SECS)
+                s_trail_age[_ti] = TRAIL_FADEIN_SECS;
+        }
+    }
 }
 
 static void RealmWalkDraw(void)
@@ -970,6 +1114,7 @@ static void RealmWalkDraw(void)
     draw_map_tiles();
     draw_trail();
     draw_scan_flash();
+    draw_flying_tiles();
     draw_hero();
     draw_resource_strip();
     draw_timer_bar();
