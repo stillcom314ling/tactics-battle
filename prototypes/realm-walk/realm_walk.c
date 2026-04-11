@@ -12,11 +12,9 @@
 #define SCROLL_DEAD_ZONE 2      /* hero cells from vp center before scroll */
 #define TURN_SECS        7.0f
 #define MAX_TRAIL       (MAP_COLS + MAP_ROWS)
-#define MAX_PENDING      50
 #define MOVE_COOLDOWN    0.12f  /* seconds between hero steps while dragging */
-#define DRAWER_SPEED     8.0f   /* animation fraction per second */
+#define LEGEND_SPEED     8.0f   /* legend panel animation speed             */
 #define SCAN_FLASH_SECS  0.60f
-#define ACTION_COUNT     4
 #define MAX_FLASH_CELLS  (MAP_COLS * MAP_ROWS)
 
 /* ---- animation constants ---- */
@@ -32,6 +30,17 @@
 #define TRAIL_FADEIN_SECS    0.12f   /* fade-in duration for new tile   */
 #define TRAIL_BORDER_RECENT  3       /* last N trail tiles get a border */
 
+/* ---- scoring constants ---- */
+#define PT_TRAIL_STEP    1           /* points per trail tile walked    */
+#define PT_DENSE_FOREST  8           /* Dense Forest contributes/turn   */
+#define PT_FARM          6           /* Farm contributes/turn           */
+#define PT_CASTLE        20          /* Castle contributes/turn         */
+#define TURNS_LIMIT      20          /* turns before game ends          */
+#define SCORE_GOAL       300         /* score needed to win             */
+#define POPUP_LIFETIME   1.4f        /* seconds a score popup lives     */
+#define POPUP_FLOAT      2.2f        /* cells upward over its lifetime  */
+#define MAX_SCORE_POPUPS 16
+
 /* ------------------------------------------------------------------- types */
 
 typedef enum {
@@ -43,24 +52,7 @@ typedef enum {
     TERRAIN_COUNT
 } Terrain;
 
-typedef enum {
-    RES_GOLD = 0,
-    RES_FAITH,
-    RES_WAR,
-    RES_REPUTATION,
-    RES_COUNT
-} Resource;
-
 typedef enum { PHASE_IDLE, PHASE_DRAGGING, PHASE_SCANNING } Phase;
-typedef enum { DRAWER_CLOSED, DRAWER_OPEN }                  DrawerState;
-
-typedef struct { Resource resource; int amount; } Connection;
-
-typedef struct {
-    const char *name;
-    Resource    cost_resource;
-    int         cost_amount;
-} KingdomAction;
 
 typedef enum {
     STRUCT_NONE = 0,
@@ -82,6 +74,13 @@ typedef struct {
     Terrain terrain;
     bool    active;
 } FlyingTile;
+
+typedef struct {
+    float tile_col, tile_row;   /* map-space position (floats upward)   */
+    int   value;
+    float age;                  /* 0 = just spawned                     */
+    bool  active;
+} ScorePopup;
 
 #define MAX_STRUCTURES 32
 
@@ -109,16 +108,12 @@ static int  s_scanned_rows[MAP_ROWS];
 static int  s_scanned_col_count;
 static int  s_scanned_row_count;
 
-/* resources */
-static int        s_resources[RES_COUNT];
-static Connection s_pending[MAX_PENDING];
-static int        s_pending_count;
-static int        s_action_counts[ACTION_COUNT];
-
 /* UI */
-static DrawerState s_drawer;
-static float       s_drawer_t;   /* 0 = closed, 1 = open */
-static float       s_scan_flash; /* counts down from SCAN_FLASH_SECS */
+static bool  s_hud_open;
+static float s_hud_t;       /* 0 = closed, 1 = open */
+static bool  s_legend_open;
+static float s_legend_t;    /* 0 = closed, 1 = open */
+static float s_scan_flash;  /* counts down from SCAN_FLASH_SECS */
 
 /* matched-cell flash positions — populated during scan, drawn during PHASE_SCANNING */
 static int s_flash_col[MAX_FLASH_CELLS];
@@ -146,6 +141,12 @@ static FlyingTile s_flying[MAX_FLYING_TILES];
 static bool       s_cell_flying_dst[MAP_ROWS][MAP_COLS]; /* suppressed cells  */
 static float      s_trail_age[MAX_TRAIL];      /* seconds since tile placed   */
 
+/* ---- scoring state ---- */
+static int        s_score;
+static int        s_turn_count;
+static bool       s_game_over;
+static ScorePopup s_popups[MAX_SCORE_POPUPS];
+
 /* -------------------------------------------------------------- data tables */
 
 static const Color TERRAIN_COLOR[TERRAIN_COUNT] = {
@@ -167,22 +168,6 @@ static const Color STRUCT_COLOR[STRUCT_TYPE_COUNT] = {
 
 static const char *STRUCT_LABEL[STRUCT_TYPE_COUNT] = {
     "", "Dense Forest", "Farm", "Castle"
-};
-
-static const Color RES_COLOR[RES_COUNT] = {
-    { 255, 215,   0, 255 }, /* GOLD       – yellow     */
-    { 180, 180, 255, 255 }, /* FAITH      – lavender   */
-    { 220,  60,  60, 255 }, /* WAR        – red        */
-    {  60, 220, 220, 255 }, /* REPUTATION – cyan       */
-};
-
-static const char *RES_NAME[RES_COUNT] = { "Gold", "Faith", "War", "Rep" };
-
-static const KingdomAction ACTIONS[ACTION_COUNT] = {
-    { "Build Market",  RES_GOLD,        5 },
-    { "Sign Treaty",   RES_REPUTATION,  4 },
-    { "Raise Army",    RES_WAR,         6 },
-    { "Build Shrine",  RES_FAITH,       3 },
 };
 
 /* ---------------------------------------------------------- layout helpers */
@@ -219,8 +204,28 @@ static Vector2 tile_center_screen(int map_col, int map_row)
     };
 }
 
-/* Drawer tab: fixed strip at the very bottom of the screen */
-static Rectangle drawer_tab_rect(void)
+/* HUD tab: compact strip pinned to the top of the screen */
+static Rectangle hud_tab_rect(void)
+{
+    int sw    = GetScreenWidth();
+    int sh    = GetScreenHeight();
+    int tab_h = sh * 6 / 100;
+    return (Rectangle){ 0, 0, (float)sw, (float)tab_h };
+}
+
+/* HUD body: slides down from below the tab when open */
+static Rectangle hud_body_rect(void)
+{
+    int sw     = GetScreenWidth();
+    int sh     = GetScreenHeight();
+    int tab_h  = sh *  6 / 100;
+    int body_h = sh * 22 / 100;
+    float y = (float)tab_h + (s_hud_t - 1.0f) * (float)body_h;
+    return (Rectangle){ 0, y, (float)sw, (float)body_h };
+}
+
+/* Legend tab: fixed strip at the very bottom of the screen */
+static Rectangle legend_tab_rect(void)
 {
     int sw    = GetScreenWidth();
     int sh    = GetScreenHeight();
@@ -228,14 +233,14 @@ static Rectangle drawer_tab_rect(void)
     return (Rectangle){ 0, (float)(sh - tab_h), (float)sw, (float)tab_h };
 }
 
-/* Drawer body: slides up from behind the tab */
-static Rectangle drawer_body_rect(void)
+/* Legend body: slides up from behind the tab */
+static Rectangle legend_body_rect(void)
 {
     int sw     = GetScreenWidth();
     int sh     = GetScreenHeight();
     int tab_h  = sh *  7 / 100;
-    int body_h = sh * 38 / 100;
-    float y = (float)(sh - tab_h) - s_drawer_t * (float)body_h;
+    int body_h = sh * 50 / 100;
+    float y = (float)(sh - tab_h) - s_legend_t * (float)body_h;
     return (Rectangle){ 0, y, (float)sw, (float)body_h };
 }
 
@@ -497,21 +502,65 @@ static void scan_matches(void)
     detect_structures();
 }
 
-static void bank_connections(void)
+static void spawn_popup(float tile_col, float tile_row, int value)
 {
-    for (int i = 0; i < s_pending_count; i++)
-        s_resources[s_pending[i].resource] += s_pending[i].amount;
-    s_pending_count = 0;
+    for (int i = 0; i < MAX_SCORE_POPUPS; i++) {
+        if (!s_popups[i].active) {
+            s_popups[i] = (ScorePopup){
+                .tile_col = tile_col,
+                .tile_row = tile_row,
+                .value    = value,
+                .age      = 0.0f,
+                .active   = true,
+            };
+            return;
+        }
+    }
+    /* all slots busy — overwrite the oldest (highest age) */
+    int oldest = 0;
+    for (int i = 1; i < MAX_SCORE_POPUPS; i++)
+        if (s_popups[i].age > s_popups[oldest].age) oldest = i;
+    s_popups[oldest] = (ScorePopup){
+        .tile_col = tile_col,
+        .tile_row = tile_row,
+        .value    = value,
+        .age      = 0.0f,
+        .active   = true,
+    };
 }
 
-static void try_action(int idx)
+static void award_turn_score(void)
 {
-    if (idx < 0 || idx >= ACTION_COUNT) return;
-    Resource r = ACTIONS[idx].cost_resource;
-    int      c = ACTIONS[idx].cost_amount;
-    if (s_resources[r] < c) return;
-    s_resources[r] -= c;
-    s_action_counts[idx]++;
+    s_turn_count++;
+
+    /* trail steps: 1 pt each — popup centered at hero */
+    int trail_pts = s_trail_len * PT_TRAIL_STEP;
+    if (trail_pts > 0)
+        spawn_popup((float)s_hero_col + 0.5f,
+                    (float)s_hero_row - 0.2f, trail_pts);
+
+    int total = trail_pts;
+
+    /* each structure on the map contributes every turn */
+    for (int i = 0; i < s_structure_count; i++) {
+        int pts = 0;
+        switch (s_structures[i].type) {
+            case STRUCT_DENSE_FOREST: pts = PT_DENSE_FOREST; break;
+            case STRUCT_FARM:         pts = PT_FARM;         break;
+            case STRUCT_CASTLE:       pts = PT_CASTLE;       break;
+            default: break;
+        }
+        if (pts > 0) {
+            total += pts;
+            /* popup centered on the structure */
+            float sc = s_structures[i].col + s_structures[i].w * 0.5f;
+            float sr = s_structures[i].row + s_structures[i].h * 0.5f - 0.5f;
+            spawn_popup(sc, sr, pts);
+        }
+    }
+
+    s_score += total;
+    if (s_turn_count >= TURNS_LIMIT) s_game_over = true;
 }
 
 static void end_turn(void)
@@ -519,6 +568,7 @@ static void end_turn(void)
     s_is_dragging = false;
     s_flash_count = 0;
     scan_matches();
+    award_turn_score();
     s_phase      = PHASE_SCANNING;
     s_scan_flash = (s_flash_count > 0) ? SCAN_FLASH_SECS : 0.0f;
     s_turn_timer = TURN_SECS;
@@ -544,6 +594,7 @@ static void generate_map(void)
 
 static void on_down(Vector2 pos)
 {
+    if (s_game_over) return;
     if (s_phase != PHASE_IDLE) return;
 
     int col, row;
@@ -605,44 +656,15 @@ static void on_up(Vector2 pos)
         return;
     }
 
-    /* drawer tab toggle */
-    if (CheckCollisionPointRec(pos, drawer_tab_rect())) {
-        s_drawer = (s_drawer == DRAWER_OPEN) ? DRAWER_CLOSED : DRAWER_OPEN;
+    /* HUD tab toggle */
+    if (CheckCollisionPointRec(pos, hud_tab_rect())) {
+        s_hud_open = !s_hud_open;
         return;
     }
 
-    if (s_drawer != DRAWER_OPEN) return;
-
-    Rectangle dr  = drawer_body_rect();
-    int        pad = (int)(dr.width * 0.05f);
-
-    /* bank button */
-    if (s_pending_count > 0) {
-        int       bh       = (int)(dr.height * 0.18f);
-        Rectangle bank_btn = {
-            dr.x + pad,
-            dr.y + (int)(dr.height * 0.08f),
-            dr.width - pad * 2,
-            (float)bh
-        };
-        if (CheckCollisionPointRec(pos, bank_btn)) {
-            bank_connections();
-            return;
-        }
-    }
-
-    /* action buttons (2×2 grid) */
-    int btn_w   = (int)((dr.width - pad * 3) / 2);
-    int btn_h   = (int)(dr.height * 0.20f);
-    int start_y = (int)(dr.y + dr.height * 0.34f);
-    for (int i = 0; i < ACTION_COUNT; i++) {
-        int bx = (int)(dr.x + pad + (i % 2) * (btn_w + pad));
-        int by = start_y + (i / 2) * (btn_h + pad / 2);
-        Rectangle btn = { (float)bx, (float)by, (float)btn_w, (float)btn_h };
-        if (CheckCollisionPointRec(pos, btn)) {
-            try_action(i);
-            return;
-        }
+    /* legend tab toggle */
+    if (CheckCollisionPointRec(pos, legend_tab_rect())) {
+        s_legend_open = !s_legend_open;
     }
 }
 
@@ -818,155 +840,265 @@ static void draw_hero(void)
 static void draw_timer_bar(void)
 {
     if (s_phase != PHASE_DRAGGING) return;
-    int   sw    = GetScreenWidth();
-    int   sh    = GetScreenHeight();
-    int   top   = sh * 7 / 100;          /* sits just below resource strip */
-    int   bh    = sh / 60;
-    float frac  = s_turn_timer / TURN_SECS;
-    Color col   = frac > 0.57f ? (Color){  80, 200,  80, 230 }
-                : frac > 0.28f ? (Color){ 220, 200,  60, 230 }
-                               : (Color){ 220,  60,  60, 230 };
-    /* filled portion */
+    int   sw   = GetScreenWidth();
+    int   sh   = GetScreenHeight();
+    int   top  = sh * 6 / 100;   /* always just below the HUD tab */
+    int   bh   = sh / 60;
+    float frac = s_turn_timer / TURN_SECS;
+    Color col  = frac > 0.57f ? (Color){  80, 200,  80, 230 }
+               : frac > 0.28f ? (Color){ 220, 200,  60, 230 }
+                              : (Color){ 220,  60,  60, 230 };
     DrawRectangle(0, top, (int)((float)sw * frac), bh, col);
-    /* depleted portion */
-    DrawRectangle((int)((float)sw * frac), top, sw - (int)((float)sw * frac), bh,
+    DrawRectangle((int)((float)sw * frac), top,
+                  sw - (int)((float)sw * frac), bh,
                   (Color){ 50, 50, 50, 180 });
 }
 
 static void draw_resource_strip(void)
 {
-    int sw      = GetScreenWidth();
-    int sh      = GetScreenHeight();
-    int strip_h = sh * 7 / 100;
-    DrawRectangle(0, 0, sw, strip_h, (Color){ 20, 20, 25, 210 });
+    int sw  = GetScreenWidth();
+    int sh  = GetScreenHeight();
+    int pad = sw / 30;
 
-    int   col_w = sw / RES_COUNT;
-    int   fs    = strip_h * 48 / 100;
-    for (int i = 0; i < RES_COUNT; i++) {
-        char buf[32];
-        snprintf(buf, sizeof(buf), "%s %d", RES_NAME[i], s_resources[i]);
-        int tw = MeasureText(buf, fs);
-        DrawText(buf, i * col_w + (col_w - tw) / 2,
-                 (strip_h - fs) / 2, fs, RES_COLOR[i]);
+    /* --- body slides down from below the tab --- */
+    if (s_hud_t > 0.02f) {
+        Rectangle dr = hud_body_rect();
+        DrawRectangleRec(dr, (Color){ 20, 22, 30, 240 });
+        DrawRectangleLinesEx(dr, 1.5f, (Color){ 60, 75, 100, 200 });
+
+        if (s_hud_t > 0.3f) {
+            int bfs = (int)(dr.height * 0.26f);
+            if (bfs < 14) bfs = 14;
+            int row1 = (int)(dr.y + dr.height * 0.15f);
+            int row2 = (int)(dr.y + dr.height * 0.55f);
+
+            /* Score */
+            char score_buf[32];
+            snprintf(score_buf, sizeof(score_buf), "Score   %d", s_score);
+            Color sc = (s_score >= SCORE_GOAL) ? (Color){ 100, 240, 100, 255 }
+                                               : (Color){ 255, 215,  70, 255 };
+            DrawText(score_buf, pad, row1, bfs, sc);
+
+            /* Goal */
+            char goal_buf[32];
+            snprintf(goal_buf, sizeof(goal_buf), "Goal    %d", SCORE_GOAL);
+            int gw = MeasureText(goal_buf, bfs);
+            DrawText(goal_buf, (sw - gw) / 2, row1, bfs,
+                     (Color){ 120, 130, 150, 210 });
+
+            /* Turns */
+            char turn_buf[32];
+            snprintf(turn_buf, sizeof(turn_buf), "Turn    %d / %d",
+                     s_turn_count, TURNS_LIMIT);
+            int tw = MeasureText(turn_buf, bfs);
+            int turns_left = TURNS_LIMIT - s_turn_count;
+            Color tc = (turns_left <= 0)
+                           ? (Color){ 255,  80,  80, 255 }
+                       : (turns_left <= TURNS_LIMIT * 3 / 10)
+                           ? (Color){ 255, 160,  60, 255 }
+                       :   (Color){ 200, 200, 200, 220 };
+            DrawText(turn_buf, sw - tw - pad, row1, bfs, tc);
+
+            /* Progress bar toward goal */
+            float prog = (float)s_score / (float)SCORE_GOAL;
+            if (prog > 1.0f) prog = 1.0f;
+            int bar_x = pad;
+            int bar_w = sw - pad * 2;
+            int bar_h = sh * 3 / 100;
+            DrawRectangle(bar_x, row2, bar_w, bar_h,
+                          (Color){ 40, 45, 55, 220 });
+            DrawRectangle(bar_x, row2, (int)(bar_w * prog), bar_h,
+                          (Color){ 255, 215, 70, 220 });
+            DrawRectangleLinesEx(
+                (Rectangle){ (float)bar_x, (float)row2,
+                             (float)bar_w, (float)bar_h },
+                1.0f, (Color){ 80, 90, 110, 200 });
+
+            /* progress label */
+            char prog_buf[32];
+            snprintf(prog_buf, sizeof(prog_buf), "%d%%",
+                     (int)(prog * 100.0f));
+            int pfs = bar_h * 80 / 100;
+            if (pfs < 10) pfs = 10;
+            int pw = MeasureText(prog_buf, pfs);
+            DrawText(prog_buf, (sw - pw) / 2,
+                     row2 + (bar_h - pfs) / 2,
+                     pfs, (Color){ 20, 20, 20, 200 });
+        }
     }
 
-    /* pending badge */
-    if (s_pending_count > 0) {
-        char   pbuf[32];
-        snprintf(pbuf, sizeof(pbuf), "+%d pending", s_pending_count);
-        int    psz = strip_h * 34 / 100;
-        int    pw  = MeasureText(pbuf, psz);
-        int    px  = (sw - pw) / 2;
-        int    py  = strip_h + 6;
-        DrawRectangle(px - 6, py - 2, pw + 12, psz + 4, (Color){ 10, 10, 10, 160 });
-        DrawText(pbuf, px, py, psz, (Color){ 255, 240, 80, 230 });
+    /* --- always-visible tab --- */
+    Rectangle tab   = hud_tab_rect();
+    int       tab_h = (int)tab.height;
+    int       fs    = tab_h * 46 / 100;
+    DrawRectangleRec(tab, (Color){ 20, 22, 30, 220 });
+    DrawLine(0, tab_h, sw, tab_h, (Color){ 60, 75, 100, 180 });
+
+    /* compact summary: Score left, Turn right, arrow centre */
+    char score_buf[24];
+    snprintf(score_buf, sizeof(score_buf), "%d", s_score);
+    Color sc = (s_score >= SCORE_GOAL) ? (Color){ 100, 240, 100, 255 }
+                                       : (Color){ 255, 215,  70, 255 };
+    DrawText(score_buf, pad, (tab_h - fs) / 2, fs, sc);
+
+    char turn_buf[24];
+    snprintf(turn_buf, sizeof(turn_buf), "%d/%d", s_turn_count, TURNS_LIMIT);
+    int tw = MeasureText(turn_buf, fs);
+    int turns_left = TURNS_LIMIT - s_turn_count;
+    Color tc = (turns_left <= 0)
+                   ? (Color){ 255,  80,  80, 255 }
+               : (turns_left <= TURNS_LIMIT * 3 / 10)
+                   ? (Color){ 255, 160,  60, 255 }
+               :   (Color){ 200, 200, 200, 220 };
+    DrawText(turn_buf, sw - tw - pad, (tab_h - fs) / 2, fs, tc);
+
+    const char *arrow = s_hud_open ? "^" : "v";
+    int aw = MeasureText(arrow, fs);
+    DrawText(arrow, (sw - aw) / 2, (tab_h - fs) / 2, fs,
+             (Color){ 160, 160, 160, 200 });
+}
+
+/* Draw a mini flat terrain grid for legend entries. */
+static void draw_legend_grid(int x, int y, int cs,
+                              const Terrain *cells, int cols, int rows)
+{
+    for (int r = 0; r < rows; r++) {
+        for (int c = 0; c < cols; c++) {
+            Terrain t = cells[r * cols + c];
+            DrawRectangle(x + c * cs, y + r * cs, cs - 1, cs - 1,
+                          TERRAIN_COLOR[t]);
+            char ltr[2] = { TERRAIN_LETTER[t], '\0' };
+            int  lfs = cs * 38 / 100;
+            if (lfs < 6) lfs = 6;
+            int  lw  = MeasureText(ltr, lfs);
+            DrawText(ltr,
+                     x + c * cs + (cs - lw)  / 2,
+                     y + r * cs + (cs - lfs) / 2,
+                     lfs, (Color){ 0, 0, 0, 100 });
+        }
     }
 }
 
-static void draw_drawer(void)
+static void draw_legend(void)
 {
     int sw = GetScreenWidth();
 
     /* --- always-visible tab --- */
-    Rectangle tab = drawer_tab_rect();
+    Rectangle tab    = legend_tab_rect();
+    int       tab_fs = (int)(tab.height * 0.42f);
     DrawRectangleRec(tab, (Color){ 30, 36, 48, 240 });
     DrawRectangleLinesEx(tab, 1.5f, (Color){ 70, 85, 110, 255 });
 
-    int tab_fs = (int)(tab.height * 0.42f);
-    /* resource summary in tab */
-    int item_w = sw / RES_COUNT;
-    for (int i = 0; i < RES_COUNT; i++) {
-        char buf[24];
-        snprintf(buf, sizeof(buf), "%s:%d", RES_NAME[i], s_resources[i]);
-        int fs = tab_fs;
-        int tw = MeasureText(buf, fs);
-        DrawText(buf, i * item_w + (item_w - tw) / 2,
-                 (int)(tab.y + (tab.height - fs) / 2), fs, RES_COLOR[i]);
-    }
+    const char *label = "Tile Guide";
+    int tlw = MeasureText(label, tab_fs);
+    DrawText(label, (sw - tlw) / 2,
+             (int)(tab.y + (tab.height - tab_fs) / 2),
+             tab_fs, (Color){ 180, 190, 210, 240 });
 
-    /* arrow indicator */
-    const char *arrow = (s_drawer == DRAWER_OPEN) ? "v" : "^";
-    int afs = tab_fs;
-    int aw  = MeasureText(arrow, afs);
+    const char *arrow = s_legend_open ? "v" : "^";
+    int aw = MeasureText(arrow, tab_fs);
     DrawText(arrow, sw - aw - 12,
-             (int)(tab.y + (tab.height - afs) / 2), afs,
-             (Color){ 160, 160, 160, 200 });
+             (int)(tab.y + (tab.height - tab_fs) / 2),
+             tab_fs, (Color){ 160, 160, 160, 200 });
 
-    if (s_drawer_t < 0.05f) return;
+    if (s_legend_t < 0.05f) return;
 
     /* --- sliding body --- */
-    Rectangle dr  = drawer_body_rect();
-    int        pad = (int)(dr.width * 0.05f);
+    Rectangle dr  = legend_body_rect();
+    int       pad = (int)(dr.width * 0.04f);
     DrawRectangleRec(dr, (Color){ 25, 30, 42, 235 });
     DrawRectangleLinesEx(dr, 1.5f, (Color){ 60, 75, 100, 200 });
 
-    if (s_drawer_t < 0.25f) return; /* skip text while barely open */
+    if (s_legend_t < 0.25f) return;
 
-    /* --- bank button --- */
-    int       bh       = (int)(dr.height * 0.18f);
-    Rectangle bank_btn = {
-        dr.x + pad,
-        dr.y + (int)(dr.height * 0.08f),
-        dr.width - pad * 2,
-        (float)bh
+    static const Terrain s_forest_cells[4] = {
+        TERRAIN_FOREST,   TERRAIN_FOREST,
+        TERRAIN_FOREST,   TERRAIN_FOREST,
     };
-    bool  can_bank  = s_pending_count > 0;
-    Color bank_bg   = can_bank ? (Color){ 50, 150, 60, 255 }
-                               : (Color){ 45, 50,  60, 200 };
-    DrawRectangleRounded(bank_btn, 0.2f, 8, bank_bg);
+    static const Terrain s_farm_cells[4] = {
+        TERRAIN_PLAINS,   TERRAIN_PLAINS,
+        TERRAIN_PLAINS,   TERRAIN_PLAINS,
+    };
+    static const Terrain s_castle_cells[9] = {
+        TERRAIN_WATER,    TERRAIN_WATER,    TERRAIN_WATER,
+        TERRAIN_WATER,    TERRAIN_MOUNTAIN, TERRAIN_WATER,
+        TERRAIN_WATER,    TERRAIN_WATER,    TERRAIN_WATER,
+    };
 
-    char bank_lbl[48];
-    snprintf(bank_lbl, sizeof(bank_lbl), "Bank Connections  (%d)", s_pending_count);
-    int bfs = bh * 38 / 100;
-    int blw = MeasureText(bank_lbl, bfs);
-    Color bank_text = can_bank ? WHITE : (Color){ 90, 90, 90, 255 };
-    DrawText(bank_lbl,
-             (int)(bank_btn.x + (bank_btn.width  - blw) / 2),
-             (int)(bank_btn.y + (bank_btn.height - bfs) / 2),
-             bfs, bank_text);
+    static const char *s_names[4] = {
+        "Dense Forest", "Farm", "Castle", "Trail Step"
+    };
+    static const char *s_descs[4] = {
+        "2x2 Forest tiles", "2x2 Plains tiles",
+        "Mountain + Water ring", "Each step on trail"
+    };
+    static const int s_pts[4] = {
+        PT_DENSE_FOREST, PT_FARM, PT_CASTLE, PT_TRAIL_STEP
+    };
 
-    /* --- action buttons (2×2) --- */
-    int btn_w   = (int)((dr.width - pad * 3) / 2);
-    int btn_h   = (int)(dr.height * 0.20f);
-    int start_y = (int)(dr.y + dr.height * 0.34f);
-    for (int i = 0; i < ACTION_COUNT; i++) {
-        int bx = (int)(dr.x + pad + (i % 2) * (btn_w + pad));
-        int by = start_y + (i / 2) * (btn_h + pad / 2);
-        Rectangle btn = { (float)bx, (float)by, (float)btn_w, (float)btn_h };
+    int n_rows    = 4;
+    int row_h     = (int)(dr.height / (float)n_rows);
+    int diagram_w = row_h;
 
-        Resource r         = ACTIONS[i].cost_resource;
-        bool     affordable = s_resources[r] >= ACTIONS[i].cost_amount;
-        Color    btn_bg    = affordable ? (Color){ 45, 65, 110, 255 }
-                                        : (Color){ 40, 40,  50, 180 };
-        DrawRectangleRounded(btn, 0.18f, 8, btn_bg);
+    for (int i = 0; i < n_rows; i++) {
+        int ry = (int)dr.y + i * row_h;
 
-        /* action name */
-        int   afs = btn_h * 33 / 100;
-        int   alw = MeasureText(ACTIONS[i].name, afs);
-        Color atc = affordable ? WHITE : (Color){ 80, 80, 80, 255 };
-        DrawText(ACTIONS[i].name, bx + (btn_w - alw) / 2, by + 6, afs, atc);
+        if (i > 0)
+            DrawLine((int)(dr.x + pad), ry,
+                     (int)(dr.x + dr.width - pad), ry,
+                     (Color){ 60, 70, 90, 160 });
 
-        /* cost + count */
-        char  cost_buf[32];
-        snprintf(cost_buf, sizeof(cost_buf), "-%d %s  [x%d]",
-                 ACTIONS[i].cost_amount, RES_NAME[r], s_action_counts[i]);
-        int cfs = btn_h * 24 / 100;
-        int clw = MeasureText(cost_buf, cfs);
-        Color ctc = affordable ? RES_COLOR[r] : (Color){ 70, 70, 70, 255 };
-        DrawText(cost_buf, bx + (btn_w - clw) / 2,
-                 by + btn_h - cfs - 6, cfs, ctc);
-    }
+        /* mini diagram */
+        if (i < 3) {
+            int g_cols = (i == 2) ? 3 : 2;
+            int g_rows = (i == 2) ? 3 : 2;
+            int cs = diagram_w / (g_cols + 1);
+            int gx = (int)(dr.x + pad) + (diagram_w - g_cols * cs) / 2;
+            int gy = ry + (row_h - g_rows * cs) / 2;
+            const Terrain *cells = (i == 0) ? s_forest_cells
+                                 : (i == 1) ? s_farm_cells
+                                            : s_castle_cells;
+            draw_legend_grid(gx, gy, cs, cells, g_cols, g_rows);
+        } else {
+            /* trail row: hero glyph placeholder */
+            int cs = diagram_w / 3;
+            int gx = (int)(dr.x + pad) + (diagram_w - cs) / 2;
+            int gy = ry + (row_h - cs) / 2;
+            DrawRectangle(gx, gy, cs - 1, cs - 1, (Color){ 240, 220, 100, 255 });
+            int hfs = cs * 55 / 100;
+            if (hfs < 6) hfs = 6;
+            int hw  = MeasureText("H", hfs);
+            DrawText("H", gx + (cs - hw) / 2, gy + (cs - hfs) / 2,
+                     hfs, (Color){ 80, 50, 10, 200 });
+        }
 
-    /* --- hint when nothing is pending --- */
-    if (s_pending_count == 0 && s_drawer_t > 0.8f) {
-        int   hfs = (int)(dr.height * 0.06f);
-        const char *hint = "Drag your hero to match tiles and earn connections";
-        int   hw  = MeasureText(hint, hfs);
-        if (hw > sw - pad * 2) hfs = hfs * (sw - pad * 2) / hw;
-        hw = MeasureText(hint, hfs);
-        DrawText(hint, (sw - hw) / 2,
-                 (int)(bank_btn.y + (bank_btn.height - hfs) / 2),
-                 hfs, (Color){ 100, 110, 130, 200 });
+        /* name + description */
+        int text_x = (int)(dr.x + pad + diagram_w + pad);
+        int name_fs = row_h * 30 / 100;
+        int desc_fs = row_h * 22 / 100;
+        if (name_fs < 12) name_fs = 12;
+        if (desc_fs < 10) desc_fs = 10;
+
+        DrawText(s_names[i], text_x,
+                 ry + (row_h / 2 - name_fs) / 2,
+                 name_fs, (Color){ 220, 225, 235, 240 });
+        DrawText(s_descs[i], text_x,
+                 ry + row_h / 2,
+                 desc_fs, (Color){ 140, 150, 170, 200 });
+
+        /* points label — right-aligned */
+        char pts_buf[24];
+        snprintf(pts_buf, sizeof(pts_buf),
+                 (i < 3) ? "+%d pt/turn" : "+%d pt/step", s_pts[i]);
+        int   pts_fs = name_fs;
+        int   pts_w  = MeasureText(pts_buf, pts_fs);
+        Color pts_c  = (s_pts[i] >= PT_CASTLE)       ? (Color){ 255, 215,  60, 255 }
+                     : (s_pts[i] >= PT_DENSE_FOREST)  ? (Color){ 100, 220, 130, 255 }
+                     :                                   (Color){ 180, 200, 220, 230 };
+        DrawText(pts_buf,
+                 (int)(dr.x + dr.width - pad - pts_w),
+                 ry + (row_h - pts_fs) / 2,
+                 pts_fs, pts_c);
     }
 }
 
@@ -1002,6 +1134,13 @@ static void RealmWalkInit(void)
     memset(s_cell_flying_dst, 0, sizeof(s_cell_flying_dst));
     memset(s_trail_age, 0, sizeof(s_trail_age));
 
+    /* scoring state */
+    s_score      = 0;
+    s_turn_count = 0;
+    s_game_over  = false;
+    for (int _pi = 0; _pi < MAX_SCORE_POPUPS; _pi++)
+        s_popups[_pi].active = false;
+
     s_is_dragging       = false;
     s_phase             = PHASE_IDLE;
     s_turn_timer        = TURN_SECS;
@@ -1012,14 +1151,13 @@ static void RealmWalkInit(void)
 
     memset(s_col_visited,   0, sizeof(s_col_visited));
     memset(s_row_visited,   0, sizeof(s_row_visited));
-    memset(s_resources,     0, sizeof(s_resources));
-    memset(s_action_counts, 0, sizeof(s_action_counts));
 
-    s_pending_count = 0;
     s_flash_count   = 0;
     s_move_cd       = 0.0f;
-    s_drawer        = DRAWER_CLOSED;
-    s_drawer_t      = 0.0f;
+    s_hud_open      = false;
+    s_hud_t         = 0.0f;
+    s_legend_open   = false;
+    s_legend_t      = 0.0f;
     s_prev_tc       = 0;
     s_prev_touch    = (Vector2){ -1.0f, -1.0f };
 
@@ -1067,9 +1205,12 @@ static void RealmWalkUpdate(float dt)
         }
     }
 
-    /* drawer animation */
-    float target = (s_drawer == DRAWER_OPEN) ? 1.0f : 0.0f;
-    s_drawer_t  += (target - s_drawer_t) * fminf(DRAWER_SPEED * dt, 1.0f);
+    /* HUD + legend panel animations */
+    float hud_target = s_hud_open ? 1.0f : 0.0f;
+    s_hud_t += (hud_target - s_hud_t) * fminf(LEGEND_SPEED * dt, 1.0f);
+
+    float leg_target = s_legend_open ? 1.0f : 0.0f;
+    s_legend_t += (leg_target - s_legend_t) * fminf(LEGEND_SPEED * dt, 1.0f);
 
     /* ---- animation lerps ---- */
     {
@@ -1108,7 +1249,74 @@ static void RealmWalkUpdate(float dt)
             if (s_trail_age[_ti] > TRAIL_FADEIN_SECS)
                 s_trail_age[_ti] = TRAIL_FADEIN_SECS;
         }
+
+        /* score popups float upward and fade out */
+        for (int _pi = 0; _pi < MAX_SCORE_POPUPS; _pi++) {
+            ScorePopup *p = &s_popups[_pi];
+            if (!p->active) continue;
+            p->age += dt;
+            p->tile_row -= (POPUP_FLOAT / POPUP_LIFETIME) * dt;
+            if (p->age >= POPUP_LIFETIME) p->active = false;
+        }
     }
+}
+
+static void draw_score_popups(void)
+{
+    int ts = tile_px();
+    for (int _pi = 0; _pi < MAX_SCORE_POPUPS; _pi++) {
+        ScorePopup *p = &s_popups[_pi];
+        if (!p->active) continue;
+
+        /* ease out: fast rise at start, slows near top */
+        float t     = p->age / POPUP_LIFETIME;
+        float alpha = (1.0f - t) * (1.0f - t);
+        unsigned char a = (unsigned char)(alpha * 255.0f);
+
+        float cx = (p->tile_col - s_vp_vis_col) * ts;
+        float cy = (p->tile_row - s_vp_vis_row) * ts;
+
+        char buf[16];
+        snprintf(buf, sizeof(buf), "+%d", p->value);
+        int fs = ts * 42 / 100;
+        if (fs < 14) fs = 14;
+        int lw = MeasureText(buf, fs);
+
+        /* drop shadow */
+        DrawText(buf, (int)cx - lw / 2 + 2, (int)cy + 2, fs,
+                 (Color){ 0, 0, 0, (unsigned char)(a / 2) });
+        /* main text — warm gold */
+        DrawText(buf, (int)cx - lw / 2, (int)cy, fs,
+                 (Color){ 255, 215, 60, a });
+    }
+}
+
+static void draw_end_game(void)
+{
+    if (!s_game_over) return;
+    int sw = GetScreenWidth(), sh = GetScreenHeight();
+
+    DrawRectangle(0, 0, sw, sh, (Color){ 0, 0, 0, 170 });
+
+    bool won = (s_score >= SCORE_GOAL);
+    const char *title   = won ? "GOAL REACHED" : "TURNS EXHAUSTED";
+    Color       title_c = won ? (Color){ 100, 240, 100, 255 }
+                               : (Color){ 255,  80,  80, 255 };
+    int tfs = sh / 9;
+    int tw  = MeasureText(title, tfs);
+    DrawText(title, (sw - tw) / 2, sh * 3 / 10, tfs, title_c);
+
+    char score_buf[48];
+    snprintf(score_buf, sizeof(score_buf), "Final Score  %d  /  %d", s_score, SCORE_GOAL);
+    int sfs = sh / 18;
+    int sw2 = MeasureText(score_buf, sfs);
+    DrawText(score_buf, (sw - sw2) / 2, sh * 3 / 10 + tfs + sh / 20,
+             sfs, (Color){ 220, 220, 220, 255 });
+
+    const char *hint = "Press ESC to return to menu";
+    int hfs = sh / 26;
+    int hw  = MeasureText(hint, hfs);
+    DrawText(hint, (sw - hw) / 2, sh * 7 / 10, hfs, (Color){ 140, 140, 150, 200 });
 }
 
 static void RealmWalkDraw(void)
@@ -1119,9 +1327,11 @@ static void RealmWalkDraw(void)
     draw_scan_flash();
     draw_flying_tiles();
     draw_hero();
+    draw_score_popups();
     draw_resource_strip();
     draw_timer_bar();
-    draw_drawer();
+    draw_legend();
+    draw_end_game();
 }
 
 static void RealmWalkDeinit(void)
