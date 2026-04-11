@@ -10,7 +10,7 @@
 #define MAP_COLS        30
 #define MAP_ROWS        20
 #define SCROLL_DEAD_ZONE 2      /* hero cells from vp center before scroll */
-#define TURN_SECS        5.0f
+#define TURN_SECS        3.5f
 #define MAX_TRAIL       (MAP_COLS + MAP_ROWS)
 #define MOVE_COOLDOWN    0.12f  /* seconds between hero steps while dragging */
 #define LEGEND_SPEED     8.0f   /* legend panel animation speed             */
