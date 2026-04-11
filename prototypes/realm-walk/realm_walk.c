@@ -32,6 +32,17 @@
 #define TRAIL_FADEIN_SECS    0.12f   /* fade-in duration for new tile   */
 #define TRAIL_BORDER_RECENT  3       /* last N trail tiles get a border */
 
+/* ---- scoring constants ---- */
+#define PT_TRAIL_STEP    1           /* points per trail tile walked    */
+#define PT_DENSE_FOREST  8           /* Dense Forest contributes/turn   */
+#define PT_FARM          6           /* Farm contributes/turn           */
+#define PT_CASTLE        20          /* Castle contributes/turn         */
+#define TURNS_LIMIT      20          /* turns before game ends          */
+#define SCORE_GOAL       300         /* score needed to win             */
+#define POPUP_LIFETIME   1.4f        /* seconds a score popup lives     */
+#define POPUP_FLOAT      2.2f        /* cells upward over its lifetime  */
+#define MAX_SCORE_POPUPS 16
+
 /* ------------------------------------------------------------------- types */
 
 typedef enum {
@@ -82,6 +93,13 @@ typedef struct {
     Terrain terrain;
     bool    active;
 } FlyingTile;
+
+typedef struct {
+    float tile_col, tile_row;   /* map-space position (floats upward)   */
+    int   value;
+    float age;                  /* 0 = just spawned                     */
+    bool  active;
+} ScorePopup;
 
 #define MAX_STRUCTURES 32
 
@@ -145,6 +163,12 @@ static float s_hero_bump;                      /* 0..0.15, decays after land  */
 static FlyingTile s_flying[MAX_FLYING_TILES];
 static bool       s_cell_flying_dst[MAP_ROWS][MAP_COLS]; /* suppressed cells  */
 static float      s_trail_age[MAX_TRAIL];      /* seconds since tile placed   */
+
+/* ---- scoring state ---- */
+static int        s_score;
+static int        s_turn_count;
+static bool       s_game_over;
+static ScorePopup s_popups[MAX_SCORE_POPUPS];
 
 /* -------------------------------------------------------------- data tables */
 
@@ -514,11 +538,73 @@ static void try_action(int idx)
     s_action_counts[idx]++;
 }
 
+static void spawn_popup(float tile_col, float tile_row, int value)
+{
+    for (int i = 0; i < MAX_SCORE_POPUPS; i++) {
+        if (!s_popups[i].active) {
+            s_popups[i] = (ScorePopup){
+                .tile_col = tile_col,
+                .tile_row = tile_row,
+                .value    = value,
+                .age      = 0.0f,
+                .active   = true,
+            };
+            return;
+        }
+    }
+    /* all slots busy — overwrite the oldest (highest age) */
+    int oldest = 0;
+    for (int i = 1; i < MAX_SCORE_POPUPS; i++)
+        if (s_popups[i].age > s_popups[oldest].age) oldest = i;
+    s_popups[oldest] = (ScorePopup){
+        .tile_col = tile_col,
+        .tile_row = tile_row,
+        .value    = value,
+        .age      = 0.0f,
+        .active   = true,
+    };
+}
+
+static void award_turn_score(void)
+{
+    s_turn_count++;
+
+    /* trail steps: 1 pt each — popup centered at hero */
+    int trail_pts = s_trail_len * PT_TRAIL_STEP;
+    if (trail_pts > 0)
+        spawn_popup((float)s_hero_col + 0.5f,
+                    (float)s_hero_row - 0.2f, trail_pts);
+
+    int total = trail_pts;
+
+    /* each structure on the map contributes every turn */
+    for (int i = 0; i < s_structure_count; i++) {
+        int pts = 0;
+        switch (s_structures[i].type) {
+            case STRUCT_DENSE_FOREST: pts = PT_DENSE_FOREST; break;
+            case STRUCT_FARM:         pts = PT_FARM;         break;
+            case STRUCT_CASTLE:       pts = PT_CASTLE;       break;
+            default: break;
+        }
+        if (pts > 0) {
+            total += pts;
+            /* popup centered on the structure */
+            float sc = s_structures[i].col + s_structures[i].w * 0.5f;
+            float sr = s_structures[i].row + s_structures[i].h * 0.5f - 0.5f;
+            spawn_popup(sc, sr, pts);
+        }
+    }
+
+    s_score += total;
+    if (s_turn_count >= TURNS_LIMIT) s_game_over = true;
+}
+
 static void end_turn(void)
 {
     s_is_dragging = false;
     s_flash_count = 0;
     scan_matches();
+    award_turn_score();
     s_phase      = PHASE_SCANNING;
     s_scan_flash = (s_flash_count > 0) ? SCAN_FLASH_SECS : 0.0f;
     s_turn_timer = TURN_SECS;
@@ -544,6 +630,7 @@ static void generate_map(void)
 
 static void on_down(Vector2 pos)
 {
+    if (s_game_over) return;
     if (s_phase != PHASE_IDLE) return;
 
     int col, row;
@@ -838,29 +925,34 @@ static void draw_resource_strip(void)
     int sw      = GetScreenWidth();
     int sh      = GetScreenHeight();
     int strip_h = sh * 7 / 100;
+    int pad     = sw / 30;
     DrawRectangle(0, 0, sw, strip_h, (Color){ 20, 20, 25, 210 });
 
-    int   col_w = sw / RES_COUNT;
-    int   fs    = strip_h * 48 / 100;
-    for (int i = 0; i < RES_COUNT; i++) {
-        char buf[32];
-        snprintf(buf, sizeof(buf), "%s %d", RES_NAME[i], s_resources[i]);
-        int tw = MeasureText(buf, fs);
-        DrawText(buf, i * col_w + (col_w - tw) / 2,
-                 (strip_h - fs) / 2, fs, RES_COLOR[i]);
-    }
+    int fs = strip_h * 50 / 100;
 
-    /* pending badge */
-    if (s_pending_count > 0) {
-        char   pbuf[32];
-        snprintf(pbuf, sizeof(pbuf), "+%d pending", s_pending_count);
-        int    psz = strip_h * 34 / 100;
-        int    pw  = MeasureText(pbuf, psz);
-        int    px  = (sw - pw) / 2;
-        int    py  = strip_h + 6;
-        DrawRectangle(px - 6, py - 2, pw + 12, psz + 4, (Color){ 10, 10, 10, 160 });
-        DrawText(pbuf, px, py, psz, (Color){ 255, 240, 80, 230 });
-    }
+    /* Score — left */
+    char score_buf[32];
+    snprintf(score_buf, sizeof(score_buf), "Score  %d", s_score);
+    Color sc = (s_score >= SCORE_GOAL) ? (Color){ 100, 240, 100, 255 }
+                                       : (Color){ 255, 215, 70, 255 };
+    DrawText(score_buf, pad, (strip_h - fs) / 2, fs, sc);
+
+    /* Goal — centre */
+    char goal_buf[32];
+    snprintf(goal_buf, sizeof(goal_buf), "Goal  %d", SCORE_GOAL);
+    int gw = MeasureText(goal_buf, fs);
+    DrawText(goal_buf, (sw - gw) / 2, (strip_h - fs) / 2, fs,
+             (Color){ 120, 130, 150, 210 });
+
+    /* Turns — right, colour-coded */
+    char turn_buf[32];
+    snprintf(turn_buf, sizeof(turn_buf), "Turn  %d / %d", s_turn_count, TURNS_LIMIT);
+    int tw = MeasureText(turn_buf, fs);
+    int turns_left = TURNS_LIMIT - s_turn_count;
+    Color tc = (turns_left <= 0)                    ? (Color){ 255,  80,  80, 255 }
+             : (turns_left <= TURNS_LIMIT * 3 / 10) ? (Color){ 255, 160,  60, 255 }
+             :                                         (Color){ 200, 200, 200, 220 };
+    DrawText(turn_buf, sw - tw - pad, (strip_h - fs) / 2, fs, tc);
 }
 
 static void draw_drawer(void)
@@ -1002,6 +1094,13 @@ static void RealmWalkInit(void)
     memset(s_cell_flying_dst, 0, sizeof(s_cell_flying_dst));
     memset(s_trail_age, 0, sizeof(s_trail_age));
 
+    /* scoring state */
+    s_score      = 0;
+    s_turn_count = 0;
+    s_game_over  = false;
+    for (int _pi = 0; _pi < MAX_SCORE_POPUPS; _pi++)
+        s_popups[_pi].active = false;
+
     s_is_dragging       = false;
     s_phase             = PHASE_IDLE;
     s_turn_timer        = TURN_SECS;
@@ -1108,7 +1207,74 @@ static void RealmWalkUpdate(float dt)
             if (s_trail_age[_ti] > TRAIL_FADEIN_SECS)
                 s_trail_age[_ti] = TRAIL_FADEIN_SECS;
         }
+
+        /* score popups float upward and fade out */
+        for (int _pi = 0; _pi < MAX_SCORE_POPUPS; _pi++) {
+            ScorePopup *p = &s_popups[_pi];
+            if (!p->active) continue;
+            p->age += dt;
+            p->tile_row -= (POPUP_FLOAT / POPUP_LIFETIME) * dt;
+            if (p->age >= POPUP_LIFETIME) p->active = false;
+        }
     }
+}
+
+static void draw_score_popups(void)
+{
+    int ts = tile_px();
+    for (int _pi = 0; _pi < MAX_SCORE_POPUPS; _pi++) {
+        ScorePopup *p = &s_popups[_pi];
+        if (!p->active) continue;
+
+        /* ease out: fast rise at start, slows near top */
+        float t     = p->age / POPUP_LIFETIME;
+        float alpha = (1.0f - t) * (1.0f - t);
+        unsigned char a = (unsigned char)(alpha * 255.0f);
+
+        float cx = (p->tile_col - s_vp_vis_col) * ts;
+        float cy = (p->tile_row - s_vp_vis_row) * ts;
+
+        char buf[16];
+        snprintf(buf, sizeof(buf), "+%d", p->value);
+        int fs = ts * 42 / 100;
+        if (fs < 14) fs = 14;
+        int lw = MeasureText(buf, fs);
+
+        /* drop shadow */
+        DrawText(buf, (int)cx - lw / 2 + 2, (int)cy + 2, fs,
+                 (Color){ 0, 0, 0, (unsigned char)(a / 2) });
+        /* main text — warm gold */
+        DrawText(buf, (int)cx - lw / 2, (int)cy, fs,
+                 (Color){ 255, 215, 60, a });
+    }
+}
+
+static void draw_end_game(void)
+{
+    if (!s_game_over) return;
+    int sw = GetScreenWidth(), sh = GetScreenHeight();
+
+    DrawRectangle(0, 0, sw, sh, (Color){ 0, 0, 0, 170 });
+
+    bool won = (s_score >= SCORE_GOAL);
+    const char *title   = won ? "GOAL REACHED" : "TURNS EXHAUSTED";
+    Color       title_c = won ? (Color){ 100, 240, 100, 255 }
+                               : (Color){ 255,  80,  80, 255 };
+    int tfs = sh / 9;
+    int tw  = MeasureText(title, tfs);
+    DrawText(title, (sw - tw) / 2, sh * 3 / 10, tfs, title_c);
+
+    char score_buf[48];
+    snprintf(score_buf, sizeof(score_buf), "Final Score  %d  /  %d", s_score, SCORE_GOAL);
+    int sfs = sh / 18;
+    int sw2 = MeasureText(score_buf, sfs);
+    DrawText(score_buf, (sw - sw2) / 2, sh * 3 / 10 + tfs + sh / 20,
+             sfs, (Color){ 220, 220, 220, 255 });
+
+    const char *hint = "Press ESC to return to menu";
+    int hfs = sh / 26;
+    int hw  = MeasureText(hint, hfs);
+    DrawText(hint, (sw - hw) / 2, sh * 7 / 10, hfs, (Color){ 140, 140, 150, 200 });
 }
 
 static void RealmWalkDraw(void)
@@ -1119,9 +1285,11 @@ static void RealmWalkDraw(void)
     draw_scan_flash();
     draw_flying_tiles();
     draw_hero();
+    draw_score_popups();
     draw_resource_strip();
     draw_timer_bar();
     draw_drawer();
+    draw_end_game();
 }
 
 static void RealmWalkDeinit(void)
