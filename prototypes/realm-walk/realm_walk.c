@@ -49,6 +49,22 @@ typedef struct {
     int         cost_amount;
 } KingdomAction;
 
+typedef enum {
+    STRUCT_NONE = 0,
+    STRUCT_DENSE_FOREST,  /* 2x2 forest */
+    STRUCT_FARM,          /* 2x2 plains */
+    STRUCT_CASTLE,        /* 3x3: mountain center + 8 water ring */
+    STRUCT_TYPE_COUNT
+} StructureType;
+
+typedef struct {
+    StructureType type;
+    int           col, row;   /* top-left anchor */
+    int           w, h;       /* size in tiles */
+} Structure;
+
+#define MAX_STRUCTURES 32
+
 /* ------------------------------------------------------------ module state */
 
 static Terrain s_map[MAP_ROWS][MAP_COLS];
@@ -96,6 +112,12 @@ static float s_move_cd;
 static int     s_prev_tc;
 static Vector2 s_prev_touch;
 
+/* combined-tile structures */
+static Structure s_structures[MAX_STRUCTURES];
+static int       s_structure_count;
+/* per-cell index into s_structures; -1 when not part of a structure */
+static int       s_cell_struct[MAP_ROWS][MAP_COLS];
+
 /* -------------------------------------------------------------- data tables */
 
 static const Color TERRAIN_COLOR[TERRAIN_COUNT] = {
@@ -108,6 +130,17 @@ static const Color TERRAIN_COLOR[TERRAIN_COUNT] = {
 
 static const char TERRAIN_LETTER[TERRAIN_COUNT] = { 'P', 'F', 'M', 'C', 'W' };
 
+static const Color STRUCT_COLOR[STRUCT_TYPE_COUNT] = {
+    {   0,   0,   0,   0 }, /* STRUCT_NONE          – unused              */
+    {  20,  80,  30, 255 }, /* STRUCT_DENSE_FOREST  – very dark green     */
+    { 230, 200,  90, 255 }, /* STRUCT_FARM          – wheat / straw       */
+    { 200, 200, 220, 255 }, /* STRUCT_CASTLE        – silver stone        */
+};
+
+static const char *STRUCT_LABEL[STRUCT_TYPE_COUNT] = {
+    "", "Dense Forest", "Farm", "Castle"
+};
+
 static const Color RES_COLOR[RES_COUNT] = {
     { 255, 215,   0, 255 }, /* GOLD       – yellow     */
     { 180, 180, 255, 255 }, /* FAITH      – lavender   */
@@ -116,14 +149,6 @@ static const Color RES_COLOR[RES_COUNT] = {
 };
 
 static const char *RES_NAME[RES_COUNT] = { "Gold", "Faith", "War", "Rep" };
-
-static const Resource TERRAIN_RESOURCE[TERRAIN_COUNT] = {
-    RES_GOLD,        /* PLAINS   */
-    RES_FAITH,       /* FOREST   */
-    RES_WAR,         /* MOUNTAIN */
-    RES_REPUTATION,  /* CITY     */
-    RES_GOLD,        /* WATER    */
-};
 
 static const KingdomAction ACTIONS[ACTION_COUNT] = {
     { "Build Market",  RES_GOLD,        5 },
@@ -229,14 +254,84 @@ static bool check_scroll_trigger(void)
     return (s_vp_col != old_vp_col || s_vp_row != old_vp_row);
 }
 
+/* Move a structure as a unit. Hero is about to enter cell (new_col, new_row),
+ * which is part of structure si. The structure shifts opposite to the hero's
+ * movement direction by its own width/height. The terrain currently at the
+ * structure's destination rectangle mirrors back into the structure's old
+ * rectangle. Returns true on success, false if blocked. */
+static bool shift_structure(int new_col, int new_row, int si)
+{
+    Structure *s = &s_structures[si];
+
+    int dx = new_col - s_hero_col;    /* -1, 0, or 1 */
+    int dy = new_row - s_hero_row;
+
+    int shift_c = -dx * s->w;
+    int shift_r = -dy * s->h;
+
+    int nc = s->col + shift_c;
+    int nr = s->row + shift_r;
+
+    /* Bounds check the structure's new rectangle */
+    if (nc < 0 || nc + s->w > MAP_COLS) return false;
+    if (nr < 0 || nr + s->h > MAP_ROWS) return false;
+
+    /* Don't allow collision with another structure in the new rectangle */
+    for (int r = 0; r < s->h; r++)
+        for (int c = 0; c < s->w; c++) {
+            int ci = s_cell_struct[nr + r][nc + c];
+            if (ci >= 0 && ci != si) return false;
+        }
+
+    /* Block swap: save old rectangles and exchange */
+    Terrain old_struct[9]; /* up to 3x3 */
+    Terrain old_dest[9];
+    for (int r = 0; r < s->h; r++)
+        for (int c = 0; c < s->w; c++) {
+            old_struct[r * s->w + c] = s_map[s->row + r][s->col + c];
+            old_dest  [r * s->w + c] = s_map[nr + r][nc + c];
+        }
+    for (int r = 0; r < s->h; r++)
+        for (int c = 0; c < s->w; c++) {
+            s_map[s->row + r][s->col + c] = old_dest  [r * s->w + c];
+            s_map[nr + r][nc + c]          = old_struct[r * s->w + c];
+        }
+
+    /* Move the structure's cell-index footprint. Shift is always ±w or ±h,
+     * so the old and new rectangles never overlap — safe to clear then set. */
+    for (int r = 0; r < s->h; r++)
+        for (int c = 0; c < s->w; c++)
+            s_cell_struct[s->row + r][s->col + c] = -1;
+    for (int r = 0; r < s->h; r++)
+        for (int c = 0; c < s->w; c++)
+            s_cell_struct[nr + r][nc + c] = si;
+
+    s->col = nc;
+    s->row = nr;
+    return true;
+}
+
 static bool advance_hero(int new_col, int new_row)
 {
     if (new_col < 0 || new_col >= MAP_COLS) return false;
     if (new_row < 0 || new_row >= MAP_ROWS) return false;
     if (new_col == s_hero_col && new_row == s_hero_row) return false;
 
-    /* Slide the tile at the destination back to the hero's previous cell */
-    s_map[s_hero_row][s_hero_col] = s_map[new_row][new_col];
+    int si = s_cell_struct[new_row][new_col];
+    if (si >= 0) {
+        /* Destination is part of a combined tile — push the whole thing. */
+        if (!shift_structure(new_col, new_row, si)) {
+            /* Structure can't move (wall, other structure) — block the hero. */
+            return false;
+        }
+        /* After the block-swap, the cell at (new_col, new_row) now contains
+         * terrain from the destination rectangle. The hero simply steps
+         * onto it — no further single-tile swap is needed because the
+         * block swap already put the displaced terrain into the old space. */
+    } else {
+        /* Normal single-tile displacement */
+        s_map[s_hero_row][s_hero_col] = s_map[new_row][new_col];
+    }
 
     if (s_trail_len < MAX_TRAIL) {
         s_trail_col[s_trail_len] = new_col;
@@ -248,82 +343,111 @@ static bool advance_hero(int new_col, int new_row)
     s_hero_row = new_row;
 
     record_visited(new_col, new_row);
+
+    /* New merges resolve at end of turn, not on every step. Existing
+     * structures are still tracked because shift_structure() updates
+     * s_cell_struct in place. */
+
     return check_scroll_trigger();
 }
 
-static void add_connection(Terrain t, int amount)
+/* ------------------------------------------------------ structure helpers */
+
+static void clear_structures(void)
 {
-    if (s_pending_count >= MAX_PENDING) return;
-    Resource res = TERRAIN_RESOURCE[t];
-    /* merge with last entry if same resource */
-    if (s_pending_count > 0 &&
-        s_pending[s_pending_count - 1].resource == res) {
-        s_pending[s_pending_count - 1].amount += amount;
-    } else {
-        s_pending[s_pending_count++] = (Connection){ res, amount };
-    }
+    s_structure_count = 0;
+    for (int r = 0; r < MAP_ROWS; r++)
+        for (int c = 0; c < MAP_COLS; c++)
+            s_cell_struct[r][c] = -1;
 }
 
-/* Pick a random terrain that is NOT the given type, for in-place replacement. */
-static Terrain random_different_terrain(Terrain exclude)
+static bool cell_has_hero(int col, int row)
 {
-    Terrain t;
-    do { t = (Terrain)GetRandomValue(0, TERRAIN_COUNT - 1); } while (t == exclude);
-    return t;
+    return (col == s_hero_col && row == s_hero_row);
 }
 
-static void scan_line_horizontal(int row)
+static bool add_structure(StructureType type, int col, int row, int w, int h)
 {
-    int c = 0;
-    while (c < MAP_COLS) {
-        Terrain t   = s_map[row][c];
-        int     run = 1;
-        while (c + run < MAP_COLS && s_map[row][c + run] == t) run++;
-        if (run >= 3) {
-            add_connection(t, run >= 5 ? 2 : 1);
-            /* replace matched tiles in-place with new random terrain */
-            for (int k = 0; k < run; k++) {
-                if (s_flash_count < MAX_FLASH_CELLS) {
-                    s_flash_col[s_flash_count] = c + k;
-                    s_flash_row[s_flash_count] = row;
-                    s_flash_count++;
-                }
-                s_map[row][c + k] = random_different_terrain(t);
-            }
+    if (s_structure_count >= MAX_STRUCTURES) return false;
+    int idx = s_structure_count++;
+    s_structures[idx] = (Structure){ type, col, row, w, h };
+    for (int r = 0; r < h; r++)
+        for (int c = 0; c < w; c++)
+            s_cell_struct[row + r][col + c] = idx;
+    return true;
+}
+
+static bool try_2x2(StructureType type, Terrain t, int c, int r)
+{
+    if (s_cell_struct[r  ][c  ] >= 0) return false;
+    if (s_cell_struct[r  ][c+1] >= 0) return false;
+    if (s_cell_struct[r+1][c  ] >= 0) return false;
+    if (s_cell_struct[r+1][c+1] >= 0) return false;
+
+    if (s_map[r  ][c  ] != t) return false;
+    if (s_map[r  ][c+1] != t) return false;
+    if (s_map[r+1][c  ] != t) return false;
+    if (s_map[r+1][c+1] != t) return false;
+
+    /* Don't form a structure under the hero — it would trap them. */
+    if (cell_has_hero(c,   r  )) return false;
+    if (cell_has_hero(c+1, r  )) return false;
+    if (cell_has_hero(c,   r+1)) return false;
+    if (cell_has_hero(c+1, r+1)) return false;
+
+    return add_structure(type, c, r, 2, 2);
+}
+
+static bool try_castle(int cc, int cr)
+{
+    /* Mountain at centre (cc, cr), 8 water neighbours. */
+    if (cc < 1 || cc >= MAP_COLS - 1) return false;
+    if (cr < 1 || cr >= MAP_ROWS - 1) return false;
+
+    if (s_map[cr][cc] != TERRAIN_MOUNTAIN) return false;
+
+    for (int dr = -1; dr <= 1; dr++) {
+        for (int dc = -1; dc <= 1; dc++) {
+            if (dc == 0 && dr == 0) continue;
+            if (s_map[cr + dr][cc + dc] != TERRAIN_WATER) return false;
         }
-        c += run;
     }
+
+    int ac = cc - 1;
+    int ar = cr - 1;
+    for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 3; c++) {
+            if (s_cell_struct[ar + r][ac + c] >= 0)   return false;
+            if (cell_has_hero(ac + c, ar + r))        return false;
+        }
+
+    return add_structure(STRUCT_CASTLE, ac, ar, 3, 3);
 }
 
-static void scan_line_vertical(int col)
+static void detect_structures(void)
 {
-    int r = 0;
-    while (r < MAP_ROWS) {
-        Terrain t   = s_map[r][col];
-        int     run = 1;
-        while (r + run < MAP_ROWS && s_map[r + run][col] == t) run++;
-        if (run >= 3) {
-            add_connection(t, run >= 5 ? 2 : 1);
-            /* replace matched tiles in-place with new random terrain */
-            for (int k = 0; k < run; k++) {
-                if (s_flash_count < MAX_FLASH_CELLS) {
-                    s_flash_col[s_flash_count] = col;
-                    s_flash_row[s_flash_count] = r + k;
-                    s_flash_count++;
-                }
-                s_map[r + k][col] = random_different_terrain(t);
-            }
-        }
-        r += run;
-    }
+    clear_structures();
+
+    /* Castles first — they're the largest and most specific. */
+    for (int r = 1; r < MAP_ROWS - 1; r++)
+        for (int c = 1; c < MAP_COLS - 1; c++)
+            try_castle(c, r);
+
+    /* 2x2 dense forest */
+    for (int r = 0; r < MAP_ROWS - 1; r++)
+        for (int c = 0; c < MAP_COLS - 1; c++)
+            try_2x2(STRUCT_DENSE_FOREST, TERRAIN_FOREST, c, r);
+
+    /* 2x2 farm */
+    for (int r = 0; r < MAP_ROWS - 1; r++)
+        for (int c = 0; c < MAP_COLS - 1; c++)
+            try_2x2(STRUCT_FARM, TERRAIN_PLAINS, c, r);
 }
 
 static void scan_matches(void)
 {
-    for (int i = 0; i < s_scanned_col_count; i++)
-        scan_line_vertical(s_scanned_cols[i]);
-    for (int i = 0; i < s_scanned_row_count; i++)
-        scan_line_horizontal(s_scanned_rows[i]);
+    /* Match-3 consuming patterns are disabled — we only form structures. */
+    detect_structures();
 }
 
 static void bank_connections(void)
@@ -482,9 +606,13 @@ static void draw_map_tiles(void)
     int ts = tile_px();
     int vc = vis_cols();
     int vr = vis_rows();
+
+    /* Pass 1: draw individual terrain tiles (skip cells that belong to a
+     * structure — those are rendered as one large tile in pass 2). */
     for (int row = s_vp_row; row < s_vp_row + vr && row < MAP_ROWS; row++) {
         for (int col = s_vp_col; col < s_vp_col + vc && col < MAP_COLS; col++) {
             if (col == s_hero_col && row == s_hero_row) continue;
+            if (s_cell_struct[row][col] >= 0) continue;
             int   sx = (col - s_vp_col) * ts;
             int   sy = (row - s_vp_row) * ts;
             Color c  = TERRAIN_COLOR[s_map[row][col]];
@@ -495,6 +623,33 @@ static void draw_map_tiles(void)
             DrawText(letter, sx + (ts - lw) / 2, sy + (ts - fs) / 2,
                      fs, (Color){ 0, 0, 0, 70 });
         }
+    }
+
+    /* Pass 2: draw each structure as a single merged rectangle */
+    for (int i = 0; i < s_structure_count; i++) {
+        Structure *s = &s_structures[i];
+        /* cull off-screen */
+        if (s->col + s->w <= s_vp_col || s->col >= s_vp_col + vc) continue;
+        if (s->row + s->h <= s_vp_row || s->row >= s_vp_row + vr) continue;
+
+        int sx = (s->col - s_vp_col) * ts;
+        int sy = (s->row - s_vp_row) * ts;
+        int w  = s->w * ts - 1;
+        int h  = s->h * ts - 1;
+
+        Color col = STRUCT_COLOR[s->type];
+        DrawRectangle(sx, sy, w, h, col);
+        /* darker border to emphasise the merged outline */
+        DrawRectangle(sx,         sy,         w, 2,     (Color){ 0, 0, 0, 120 });
+        DrawRectangle(sx,         sy + h - 2, w, 2,     (Color){ 0, 0, 0, 120 });
+        DrawRectangle(sx,         sy,         2, h,     (Color){ 0, 0, 0, 120 });
+        DrawRectangle(sx + w - 2, sy,         2, h,     (Color){ 0, 0, 0, 120 });
+
+        const char *label = STRUCT_LABEL[s->type];
+        int fs = ts * 34 / 100;
+        int lw = MeasureText(label, fs);
+        DrawText(label, sx + (w - lw) / 2, sy + (h - fs) / 2,
+                 fs, (Color){ 255, 255, 255, 220 });
     }
 }
 
@@ -723,6 +878,7 @@ static void draw_drawer(void)
 static void RealmWalkInit(void)
 {
     generate_map();
+    clear_structures();
 
     s_hero_col = MAP_COLS / 2;
     s_hero_row = MAP_ROWS / 2;
@@ -758,6 +914,9 @@ static void RealmWalkInit(void)
     s_drawer_t      = 0.0f;
     s_prev_tc       = 0;
     s_prev_touch    = (Vector2){ -1.0f, -1.0f };
+
+    /* Hero position is set — now detect any initial structures */
+    detect_structures();
 }
 
 static void RealmWalkUpdate(float dt)
