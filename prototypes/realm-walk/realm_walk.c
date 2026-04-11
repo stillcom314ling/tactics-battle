@@ -867,63 +867,79 @@ static void draw_resource_strip(void)
         DrawRectangleLinesEx(dr, 1.5f, (Color){ 60, 75, 100, 200 });
 
         if (s_hud_t > 0.3f) {
-            int bfs = (int)(dr.height * 0.26f);
-            if (bfs < 14) bfs = 14;
-            int row1 = (int)(dr.y + dr.height * 0.15f);
-            int row2 = (int)(dr.y + dr.height * 0.55f);
+            int n_rows = 3;
+            int row_h  = (int)(dr.height * 0.26f);
+            int bar_h  = (int)(dr.height * 0.16f);
+            /* centre the block vertically */
+            int block_h = n_rows * row_h + bar_h;
+            int oy      = (int)(dr.y + (dr.height - block_h) * 0.45f);
 
-            /* Score */
-            char score_buf[32];
-            snprintf(score_buf, sizeof(score_buf), "Score   %d", s_score);
-            Color sc = (s_score >= SCORE_GOAL) ? (Color){ 100, 240, 100, 255 }
-                                               : (Color){ 255, 215,  70, 255 };
-            DrawText(score_buf, pad, row1, bfs, sc);
+            int lfs = row_h * 44 / 100;
+            if (lfs < 12) lfs = 12;
 
-            /* Goal */
-            char goal_buf[32];
-            snprintf(goal_buf, sizeof(goal_buf), "Goal    %d", SCORE_GOAL);
-            int gw = MeasureText(goal_buf, bfs);
-            DrawText(goal_buf, (sw - gw) / 2, row1, bfs,
-                     (Color){ 120, 130, 150, 210 });
-
-            /* Turns */
-            char turn_buf[32];
-            snprintf(turn_buf, sizeof(turn_buf), "Turn    %d / %d",
-                     s_turn_count, TURNS_LIMIT);
-            int tw = MeasureText(turn_buf, bfs);
-            int turns_left = TURNS_LIMIT - s_turn_count;
-            Color tc = (turns_left <= 0)
-                           ? (Color){ 255,  80,  80, 255 }
-                       : (turns_left <= TURNS_LIMIT * 3 / 10)
-                           ? (Color){ 255, 160,  60, 255 }
-                       :   (Color){ 200, 200, 200, 220 };
-            DrawText(turn_buf, sw - tw - pad, row1, bfs, tc);
-
-            /* Progress bar toward goal */
-            float prog = (float)s_score / (float)SCORE_GOAL;
-            if (prog > 1.0f) prog = 1.0f;
-            int bar_x = pad;
-            int bar_w = sw - pad * 2;
-            int bar_h = sh * 3 / 100;
-            DrawRectangle(bar_x, row2, bar_w, bar_h,
-                          (Color){ 40, 45, 55, 220 });
-            DrawRectangle(bar_x, row2, (int)(bar_w * prog), bar_h,
-                          (Color){ 255, 215, 70, 220 });
-            DrawRectangleLinesEx(
-                (Rectangle){ (float)bar_x, (float)row2,
-                             (float)bar_w, (float)bar_h },
-                1.0f, (Color){ 80, 90, 110, 200 });
-
-            /* progress label */
-            char prog_buf[32];
-            snprintf(prog_buf, sizeof(prog_buf), "%d%%",
-                     (int)(prog * 100.0f));
-            int pfs = bar_h * 80 / 100;
-            if (pfs < 10) pfs = 10;
-            int pw = MeasureText(prog_buf, pfs);
-            DrawText(prog_buf, (sw - pw) / 2,
-                     row2 + (bar_h - pfs) / 2,
-                     pfs, (Color){ 20, 20, 20, 200 });
+            /* --- row 0: Score --- */
+            {
+                int ry = oy;
+                DrawText("Score", pad, ry + (row_h - lfs) / 2, lfs,
+                         (Color){ 140, 150, 170, 200 });
+                char buf[24];
+                snprintf(buf, sizeof(buf), "%d", s_score);
+                Color vc = (s_score >= SCORE_GOAL) ? (Color){ 100, 240, 100, 255 }
+                                                   : (Color){ 255, 215,  70, 255 };
+                int vw = MeasureText(buf, lfs);
+                DrawText(buf, sw - vw - pad, ry + (row_h - lfs) / 2, lfs, vc);
+            }
+            /* --- row 1: Goal --- */
+            {
+                int ry = oy + row_h;
+                DrawText("Goal", pad, ry + (row_h - lfs) / 2, lfs,
+                         (Color){ 140, 150, 170, 200 });
+                char buf[24];
+                snprintf(buf, sizeof(buf), "%d", SCORE_GOAL);
+                int vw = MeasureText(buf, lfs);
+                DrawText(buf, sw - vw - pad, ry + (row_h - lfs) / 2, lfs,
+                         (Color){ 180, 190, 210, 220 });
+            }
+            /* --- row 2: Turn --- */
+            {
+                int ry = oy + row_h * 2;
+                DrawText("Turn", pad, ry + (row_h - lfs) / 2, lfs,
+                         (Color){ 140, 150, 170, 200 });
+                char buf[24];
+                snprintf(buf, sizeof(buf), "%d / %d", s_turn_count, TURNS_LIMIT);
+                int turns_left = TURNS_LIMIT - s_turn_count;
+                Color vc = (turns_left <= 0)
+                               ? (Color){ 255,  80,  80, 255 }
+                           : (turns_left <= TURNS_LIMIT * 3 / 10)
+                               ? (Color){ 255, 160,  60, 255 }
+                           :   (Color){ 200, 200, 200, 220 };
+                int vw = MeasureText(buf, lfs);
+                DrawText(buf, sw - vw - pad, ry + (row_h - lfs) / 2, lfs, vc);
+            }
+            /* --- progress bar --- */
+            {
+                int by   = oy + row_h * 3;
+                float prog = (float)s_score / (float)SCORE_GOAL;
+                if (prog > 1.0f) prog = 1.0f;
+                int bw = sw - pad * 2;
+                DrawRectangle(pad, by, bw, bar_h,
+                              (Color){ 40, 45, 55, 220 });
+                DrawRectangle(pad, by, (int)(bw * prog), bar_h,
+                              (Color){ 255, 215, 70, 220 });
+                DrawRectangleLinesEx(
+                    (Rectangle){ (float)pad, (float)by,
+                                 (float)bw,  (float)bar_h },
+                    1.0f, (Color){ 80, 90, 110, 200 });
+                /* percentage inside bar */
+                char pct[16];
+                snprintf(pct, sizeof(pct), "%d%%", (int)(prog * 100.0f));
+                int pfs = bar_h * 60 / 100;
+                if (pfs < 10) pfs = 10;
+                int pw = MeasureText(pct, pfs);
+                DrawText(pct, (sw - pw) / 2,
+                         by + (bar_h - pfs) / 2,
+                         pfs, (Color){ 20, 20, 20, 200 });
+            }
         }
     }
 
