@@ -656,10 +656,16 @@ static void detect_structures(void)
 
 static void scan_matches(void)
 {
-    detect_structures();
+    /* Snapshot structures that survived from previous turns (positions already
+     * updated by any shift_structure calls made during this turn). */
+    int prev_count = s_structure_count;
+    Structure prev_structs[MAX_STRUCTURES];
+    for (int i = 0; i < prev_count; i++)
+        prev_structs[i] = s_structures[i];
 
-    /* Keep only structures that include at least one cell the hero touched
-     * this turn. Patterns in areas the hero never walked are discarded. */
+    detect_structures();   /* clears + re-detects all valid patterns */
+
+    /* Keep newly detected structures where the hero walked this turn. */
     int kept = 0;
     Structure kept_structs[MAX_STRUCTURES];
     for (int i = 0; i < s_structure_count; i++) {
@@ -671,17 +677,34 @@ static void scan_matches(void)
         if (touched)
             kept_structs[kept++] = *s;
     }
-    /* Rebuild the structures array and s_cell_struct index */
+
+    /* Rebuild index from newly formed structures first. */
     s_structure_count = 0;
     for (int r = 0; r < MAP_ROWS; r++)
         for (int c = 0; c < MAP_COLS; c++)
             s_cell_struct[r][c] = -1;
     for (int i = 0; i < kept; i++) {
-        s_structures[i] = kept_structs[i];
+        s_structures[s_structure_count] = kept_structs[i];
+        for (int ci = 0; ci < kept_structs[i].cell_count; ci++)
+            s_cell_struct[kept_structs[i].row + kept_structs[i].cell_dr[ci]]
+                         [kept_structs[i].col + kept_structs[i].cell_dc[ci]] = s_structure_count;
         s_structure_count++;
-        for (int ci = 0; ci < s_structures[i].cell_count; ci++)
-            s_cell_struct[s_structures[i].row + s_structures[i].cell_dr[ci]]
-                         [s_structures[i].col + s_structures[i].cell_dc[ci]] = i;
+    }
+
+    /* Re-add structures from previous turns that don't overlap new ones. */
+    for (int pi = 0; pi < prev_count && s_structure_count < MAX_STRUCTURES; pi++) {
+        Structure *s = &prev_structs[pi];
+        bool conflict = false;
+        for (int ci = 0; ci < s->cell_count && !conflict; ci++)
+            if (s_cell_struct[s->row + s->cell_dr[ci]][s->col + s->cell_dc[ci]] >= 0)
+                conflict = true;
+        if (!conflict) {
+            s_structures[s_structure_count] = *s;
+            for (int ci = 0; ci < s->cell_count; ci++)
+                s_cell_struct[s->row + s->cell_dr[ci]]
+                             [s->col + s->cell_dc[ci]] = s_structure_count;
+            s_structure_count++;
+        }
     }
 }
 
