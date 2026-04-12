@@ -482,8 +482,9 @@ static bool try_2x2(StructureType type, Terrain t, int c, int r)
     static const int drs[4] = { 0, 0, 1, 1 };
     for (int i = 0; i < 4; i++) {
         int cc = c + dcs[i], cr = r + drs[i];
-        if (s_cell_struct[cr][cc] >= 0) return false;
-        if (s_map[cr][cc] != t)         return false;
+        if (s_cell_struct[cr][cc] >= 0)    return false;
+        if (s_map[cr][cc] != t)            return false;
+        if (!s_visited_cell[cr][cc])       return false;
     }
     return add_structure_cells(type, dcs, drs, 4, c, r);
 }
@@ -507,7 +508,8 @@ static bool try_ring_3x3(StructureType type,
     int n = 0;
     for (int r = 0; r < 3; r++)
         for (int c = 0; c < 3; c++) {
-            if (s_cell_struct[ar + r][ac + c] >= 0) return false;
+            if (s_cell_struct[ar + r][ac + c] >= 0)  return false;
+            if (!s_visited_cell[ar + r][ac + c])      return false;
             dcs[n] = c; drs[n] = r; n++;
         }
     return add_structure_cells(type, dcs, drs, 9, ac, ar);
@@ -529,6 +531,7 @@ static bool try_row(StructureType type, Terrain t,
         for (int dc = 0; dc < w; dc++) {
             if (s_cell_struct[r + dr][c + dc] >= 0) return false;
             if (s_map[r + dr][c + dc] != t)         return false;
+            if (!s_visited_cell[r + dr][c + dc])    return false;
             dcs[n] = dc; drs[n] = dr; n++;
         }
     return add_structure_cells(type, dcs, drs, n, c, r);
@@ -567,13 +570,14 @@ static bool try_shape(StructureType type, Terrain t,
                 ndrs[i] = drs[i] - min_dr;
             }
 
-            /* Bounds, terrain, and structure checks */
+            /* Bounds, terrain, structure, and visited checks */
             bool ok = true;
             for (int i = 0; i < n && ok; i++) {
                 int cc = ac + ndcs[i], cr = ar + ndrs[i];
                 if (cc < 0 || cc >= MAP_COLS || cr < 0 || cr >= MAP_ROWS) ok = false;
                 else if (s_map[cr][cc] != t)         ok = false;
                 else if (s_cell_struct[cr][cc] >= 0) ok = false;
+                else if (!s_visited_cell[cr][cc])    ok = false;
             }
             if (ok) return add_structure_cells(type, ndcs, ndrs, n, ac, ar);
 
@@ -657,39 +661,10 @@ static void detect_structures(void)
 
 static void scan_matches(void)
 {
-    int base = s_structure_count;   /* locked structures from previous turns */
-
-    /* Detect new patterns — locked cells (s_cell_struct >= 0) prevent reuse */
+    /* Each try_* function now requires s_visited_cell to be true for ALL
+     * of its cells, so only patterns the hero fully traced this turn are
+     * added.  Previously locked cells (s_cell_struct >= 0) block reuse. */
     detect_structures();
-
-    /* Of the newly detected structures (indices base..s_structure_count-1),
-     * keep only those where the hero walked EVERY cell this turn.
-     * Requiring all cells prevents a wrong-orientation pattern from
-     * grabbing a shared cell and blocking the intended shape. */
-    int kept = base;
-    for (int i = base; i < s_structure_count; i++) {
-        Structure *s = &s_structures[i];
-        bool all_walked = true;
-        for (int ci = 0; ci < s->cell_count && all_walked; ci++)
-            if (!s_visited_cell[s->row + s->cell_dr[ci]][s->col + s->cell_dc[ci]])
-                all_walked = false;
-        if (all_walked) {
-            if (kept != i) {
-                /* Compact: update s_cell_struct to the new (lower) index */
-                for (int ci = 0; ci < s->cell_count; ci++)
-                    s_cell_struct[s->row + s->cell_dr[ci]]
-                                 [s->col + s->cell_dc[ci]] = kept;
-                s_structures[kept] = *s;
-            }
-            kept++;
-        } else {
-            /* Release cells so the locked-tile check stays accurate */
-            for (int ci = 0; ci < s->cell_count; ci++)
-                s_cell_struct[s->row + s->cell_dr[ci]]
-                             [s->col + s->cell_dc[ci]] = -1;
-        }
-    }
-    s_structure_count = kept;
 }
 
 static void spawn_popup(float tile_col, float tile_row, int value)
