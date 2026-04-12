@@ -172,28 +172,28 @@ static ScorePopup s_popups[MAX_SCORE_POPUPS];
 /* -------------------------------------------------------------- data tables */
 
 static const Color TERRAIN_COLOR[TERRAIN_COUNT] = {
-    { 180, 220, 100, 255 }, /* PLAINS   – olive green */
-    {  34, 120,  50, 255 }, /* FOREST   – dark green  */
-    { 130, 130, 140, 255 }, /* MOUNTAIN – stone grey  */
-    { 200, 160,  80, 255 }, /* CITY     – amber       */
-    {  60, 130, 200, 255 }, /* WATER    – blue        */
+    { 168, 255, 120, 255 }, /* PLAINS   – electric lime    */
+    {  80, 230, 160, 255 }, /* FOREST   – mint emerald     */
+    { 195, 175, 255, 255 }, /* MOUNTAIN – bright lavender  */
+    { 255, 200,  80, 255 }, /* CITY     – amber gold       */
+    {  70, 210, 255, 255 }, /* WATER    – electric cyan    */
 };
 
 static const char TERRAIN_LETTER[TERRAIN_COUNT] = { 'P', 'F', 'M', 'C', 'W' };
 
 static const Color STRUCT_COLOR[STRUCT_TYPE_COUNT] = {
     {   0,   0,   0,   0 }, /* NONE           */
-    {  20,  80,  30, 255 }, /* DENSE_FOREST   – dark green  */
-    { 230, 200,  90, 255 }, /* FARM           – straw       */
-    { 200, 200, 220, 255 }, /* CASTLE         – silver      */
-    {  70, 130,  60, 255 }, /* LUMBER_CAMP    – mid green   */
-    {  40, 100, 200, 255 }, /* RIVER          – deep blue   */
-    { 200, 210, 100, 255 }, /* WHEAT_FIELD    – pale gold   */
-    { 190, 130,  60, 255 }, /* ROAD           – earthy      */
-    { 110, 110, 120, 255 }, /* QUARRY         – stone grey  */
-    {  30,  95,  40, 255 }, /* FOREST_CORNER  – forest L    */
-    {  50, 120, 210, 255 }, /* RIVER_BEND     – water L     */
-    { 210, 150,  70, 255 }, /* CROSSROADS     – city +      */
+    {  50, 210,  95, 255 }, /* DENSE_FOREST   – vivid green    */
+    { 245, 230, 100, 255 }, /* FARM           – bright gold     */
+    { 220, 230, 255, 255 }, /* CASTLE         – ice white       */
+    { 100, 215, 135, 255 }, /* LUMBER_CAMP    – jade            */
+    {  50, 175, 255, 255 }, /* RIVER          – cobalt blue     */
+    { 255, 240, 130, 255 }, /* WHEAT_FIELD    – lemon           */
+    { 255, 175,  80, 255 }, /* ROAD           – bright orange   */
+    { 205, 185, 255, 255 }, /* QUARRY         – light violet    */
+    {  60, 225, 115, 255 }, /* FOREST_CORNER  – bright teal     */
+    {  75, 195, 255, 255 }, /* RIVER_BEND     – bright cyan     */
+    { 255, 200,  65, 255 }, /* CROSSROADS     – warm gold       */
 };
 
 static const char *STRUCT_LABEL[STRUCT_TYPE_COUNT] = {
@@ -877,13 +877,22 @@ static void draw_map_tiles(void)
             if (s_cell_flying_dst[row][col]) continue;   /* animated tile en-route */
             int   sx = (int)((col - s_vp_vis_col) * ts);
             int   sy = (int)((row - s_vp_vis_row) * ts);
+            int   tw = ts - 2;   /* 2px OLED-black gap between tiles */
             Color c  = TERRAIN_COLOR[s_map[row][col]];
-            DrawRectangle(sx, sy, ts - 1, ts - 1, c);
+            DrawRectangleRounded(
+                (Rectangle){ (float)sx, (float)sy, (float)tw, (float)tw },
+                0.18f, 4, c);
+            /* top-left bevel highlight */
+            unsigned char hr = (unsigned char)fminf(c.r + 70.0f, 255.0f);
+            unsigned char hg = (unsigned char)fminf(c.g + 70.0f, 255.0f);
+            unsigned char hb = (unsigned char)fminf(c.b + 70.0f, 255.0f);
+            DrawRectangle(sx + 1, sy + 1, tw - 2, 2, (Color){ hr, hg, hb, 90 });
+            DrawRectangle(sx + 1, sy + 1, 2, tw - 2, (Color){ hr, hg, hb, 60 });
             char letter[2] = { TERRAIN_LETTER[s_map[row][col]], '\0' };
-            int  fs = ts * 28 / 100;
+            int  fs = ts * 26 / 100;
             int  lw = MeasureText(letter, fs);
-            DrawText(letter, sx + (ts - lw) / 2, sy + (ts - fs) / 2,
-                     fs, (Color){ 0, 0, 0, 70 });
+            DrawText(letter, sx + (tw - lw) / 2, sy + (tw - fs) / 2,
+                     fs, (Color){ 0, 0, 0, 110 });
         }
     }
 
@@ -895,13 +904,25 @@ static void draw_map_tiles(void)
         if (s->row + s->h <= s_vp_row - 1 || s->row >= s_vp_row + vr + 1) continue;
 
         Color col = STRUCT_COLOR[s->type];
+        int tw = ts - 2;
+        /* glow color: slightly brighter than base */
+        unsigned char gr = (unsigned char)fminf(col.r + 60.0f, 255.0f);
+        unsigned char gg = (unsigned char)fminf(col.g + 60.0f, 255.0f);
+        unsigned char gb = (unsigned char)fminf(col.b + 60.0f, 255.0f);
         for (int ci = 0; ci < s->cell_count; ci++) {
             int cx = (int)((s->col + s->cell_dc[ci] - s_vp_vis_col) * ts);
             int cy = (int)((s->row + s->cell_dr[ci] - s_vp_vis_row) * ts);
-            DrawRectangle(cx, cy, ts - 1, ts - 1, col);
-            DrawRectangleLinesEx(
-                (Rectangle){ (float)cx, (float)cy, (float)(ts - 1), (float)(ts - 1) },
-                1.5f, (Color){ 0, 0, 0, 80 });
+            /* outer glow halo */
+            DrawRectangleRounded(
+                (Rectangle){ (float)(cx-2), (float)(cy-2), (float)(tw+4), (float)(tw+4) },
+                0.28f, 4, (Color){ col.r, col.g, col.b, 55 });
+            /* main cell */
+            DrawRectangleRounded(
+                (Rectangle){ (float)cx, (float)cy, (float)tw, (float)tw },
+                0.20f, 4, col);
+            /* top-left bevel highlight */
+            DrawRectangle(cx + 1, cy + 1, tw - 2, 2, (Color){ gr, gg, gb, 120 });
+            DrawRectangle(cx + 1, cy + 1, 2, tw - 2, (Color){ gr, gg, gb, 80 });
         }
 
         /* Label centered on bounding box */
@@ -912,8 +933,11 @@ static void draw_map_tiles(void)
         const char *label = STRUCT_LABEL[s->type];
         int fs = ts * 34 / 100;
         int lw = MeasureText(label, fs);
+        /* drop shadow then white label */
+        DrawText(label, sx + (bw - lw) / 2 + 1, sy + (bh - fs) / 2 + 1,
+                 fs, (Color){ 0, 0, 0, 140 });
         DrawText(label, sx + (bw - lw) / 2, sy + (bh - fs) / 2,
-                 fs, (Color){ 255, 255, 255, 220 });
+                 fs, (Color){ 255, 255, 255, 235 });
     }
 }
 
@@ -939,13 +963,19 @@ static void draw_trail(void)
         float fade_frac = fminf(s_trail_age[i] / TRAIL_FADEIN_SECS, 1.0f);
         int alpha = (int)(base_alpha * fade_frac);
 
-        DrawRectangle(sx, sy, ts - 1, ts - 1,
-                      (Color){ 255, 255, 255, (unsigned char)alpha });
-        /* subtle border on the most recent TRAIL_BORDER_RECENT tiles */
+        /* colour gradient: oldest = cool cyan, newest = warm gold */
+        unsigned char tr = (unsigned char)(80  + (int)(175 * gradient_t));
+        unsigned char tg = (unsigned char)(200 + (int)( 20 * gradient_t));
+        unsigned char tb = (unsigned char)(255 - (int)(195 * gradient_t));
+        int tw = ts - 2;
+        DrawRectangleRounded(
+            (Rectangle){ (float)sx, (float)sy, (float)tw, (float)tw },
+            0.18f, 4, (Color){ tr, tg, tb, (unsigned char)alpha });
+        /* glowing border on the most recent TRAIL_BORDER_RECENT tiles */
         if (i >= s_trail_len - TRAIL_BORDER_RECENT) {
             DrawRectangleLinesEx(
-                (Rectangle){ (float)sx, (float)sy, (float)(ts - 1), (float)(ts - 1) },
-                1.5f, (Color){ 255, 255, 255, (unsigned char)(alpha / 2) });
+                (Rectangle){ (float)sx, (float)sy, (float)tw, (float)tw },
+                2.0f, (Color){ tr, tg, tb, (unsigned char)(alpha * 3 / 4) });
         }
     }
 }
@@ -990,16 +1020,20 @@ static void draw_flying_tiles(void)
         int sx = (int)((ft->vis_col - s_vp_vis_col) * ts);
         int sy = (int)((ft->vis_row - s_vp_vis_row) * ts);
         if (sx + ts < 0 || sx > sw || sy + ts < 0 || sy > sh) continue;
-        DrawRectangle(sx, sy, ts - 1, ts - 1, TERRAIN_COLOR[ft->terrain]);
-        /* white border signals this tile is in motion */
+        int   tw = ts - 2;
+        Color tc = TERRAIN_COLOR[ft->terrain];
+        DrawRectangleRounded(
+            (Rectangle){ (float)sx, (float)sy, (float)tw, (float)tw },
+            0.18f, 4, tc);
+        /* bright white border signals tile is in motion */
         DrawRectangleLinesEx(
-            (Rectangle){ (float)sx, (float)sy, (float)(ts - 1), (float)(ts - 1) },
-            2.0f, (Color){ 255, 255, 255, 160 });
+            (Rectangle){ (float)sx, (float)sy, (float)tw, (float)tw },
+            2.5f, (Color){ 255, 255, 255, 200 });
         char letter[2] = { TERRAIN_LETTER[ft->terrain], '\0' };
-        int  fs = ts * 28 / 100;
+        int  fs = ts * 26 / 100;
         int  lw = MeasureText(letter, fs);
-        DrawText(letter, sx + (ts - lw) / 2, sy + (ts - fs) / 2,
-                 fs, (Color){ 0, 0, 0, 70 });
+        DrawText(letter, sx + (tw - lw) / 2, sy + (tw - fs) / 2,
+                 fs, (Color){ 0, 0, 0, 110 });
     }
 }
 
@@ -1018,14 +1052,22 @@ static void draw_hero(void)
     float sx = cx - w * 0.5f;
     float sy = cy - h * 0.5f;
 
-    DrawRectangleV((Vector2){ sx, sy }, (Vector2){ w, h },
-                   (Color){ 240, 220, 100, 255 });
+    /* outer glow ring */
+    float gw = w + 6.0f * scale;
+    DrawRectangleRounded(
+        (Rectangle){ cx - gw * 0.5f, cy - gw * 0.5f, gw, gw },
+        0.30f, 6, (Color){ 220, 100, 255, 60 });
+    /* main hero tile — bright white */
+    DrawRectangleRounded(
+        (Rectangle){ sx, sy, w, h },
+        0.22f, 6, (Color){ 255, 255, 255, 255 });
+    /* vivid magenta border */
     DrawRectangleLinesEx((Rectangle){ sx, sy, w, h },
-                         2.0f, (Color){ 180, 140, 40, 255 });
+                         2.5f, (Color){ 220, 80, 255, 255 });
     int  fs = (int)(ts * 36 / 100 * scale);
-    int  lw = MeasureText("H", fs);
-    DrawText("H", (int)(cx - lw * 0.5f), (int)(cy - fs * 0.5f),
-             fs, (Color){ 80, 50, 10, 200 });
+    int  lw = MeasureText("@", fs);
+    DrawText("@", (int)(cx - lw * 0.5f), (int)(cy - fs * 0.5f),
+             fs, (Color){ 40, 0, 60, 220 });
 }
 
 static void draw_timer_bar(void)
@@ -1054,8 +1096,8 @@ static void draw_resource_strip(void)
     /* --- body slides down from below the tab --- */
     if (s_hud_t > 0.02f) {
         Rectangle dr = hud_body_rect();
-        DrawRectangleRec(dr, (Color){ 20, 22, 30, 240 });
-        DrawRectangleLinesEx(dr, 1.5f, (Color){ 60, 75, 100, 200 });
+        DrawRectangleRec(dr, (Color){ 8, 8, 12, 248 });
+        DrawRectangleLinesEx(dr, 1.5f, (Color){ 220, 80, 255, 160 });
 
         if (s_hud_t > 0.3f) {
             int n_rows = 3;
@@ -1114,13 +1156,13 @@ static void draw_resource_strip(void)
                 if (prog > 1.0f) prog = 1.0f;
                 int bw = sw - pad * 2;
                 DrawRectangle(pad, by, bw, bar_h,
-                              (Color){ 40, 45, 55, 220 });
+                              (Color){ 20, 20, 28, 230 });
                 DrawRectangle(pad, by, (int)(bw * prog), bar_h,
-                              (Color){ 255, 215, 70, 220 });
+                              (Color){ 255, 200, 65, 230 });
                 DrawRectangleLinesEx(
                     (Rectangle){ (float)pad, (float)by,
                                  (float)bw,  (float)bar_h },
-                    1.0f, (Color){ 80, 90, 110, 200 });
+                    1.0f, (Color){ 220, 80, 255, 160 });
                 /* percentage inside bar */
                 char pct[16];
                 snprintf(pct, sizeof(pct), "%d%%", (int)(prog * 100.0f));
@@ -1138,8 +1180,8 @@ static void draw_resource_strip(void)
     Rectangle tab   = hud_tab_rect();
     int       tab_h = (int)tab.height;
     int       fs    = tab_h * 46 / 100;
-    DrawRectangleRec(tab, (Color){ 20, 22, 30, 220 });
-    DrawLine(0, tab_h, sw, tab_h, (Color){ 60, 75, 100, 180 });
+    DrawRectangleRec(tab, (Color){ 0, 0, 0, 240 });
+    DrawLine(0, tab_h, sw, tab_h, (Color){ 220, 80, 255, 180 });
 
     /* compact summary: Score left, Turn right, arrow centre */
     char score_buf[24];
@@ -1193,14 +1235,14 @@ static void draw_legend(void)
     /* --- always-visible tab --- */
     Rectangle tab    = legend_tab_rect();
     int       tab_fs = (int)(tab.height * 0.42f);
-    DrawRectangleRec(tab, (Color){ 30, 36, 48, 240 });
-    DrawRectangleLinesEx(tab, 1.5f, (Color){ 70, 85, 110, 255 });
+    DrawRectangleRec(tab, (Color){ 0, 0, 0, 245 });
+    DrawRectangleLinesEx(tab, 1.5f, (Color){ 70, 210, 255, 200 });
 
     const char *label = "Tile Guide";
     int tlw = MeasureText(label, tab_fs);
     DrawText(label, (sw - tlw) / 2,
              (int)(tab.y + (tab.height - tab_fs) / 2),
-             tab_fs, (Color){ 180, 190, 210, 240 });
+             tab_fs, (Color){ 70, 210, 255, 255 });
 
     const char *arrow = s_legend_open ? "v" : "^";
     int aw = MeasureText(arrow, tab_fs);
@@ -1213,8 +1255,8 @@ static void draw_legend(void)
     /* --- sliding body --- */
     Rectangle dr  = legend_body_rect();
     int       pad = (int)(dr.width * 0.04f);
-    DrawRectangleRec(dr, (Color){ 25, 30, 42, 235 });
-    DrawRectangleLinesEx(dr, 1.5f, (Color){ 60, 75, 100, 200 });
+    DrawRectangleRec(dr, (Color){ 5, 5, 8, 248 });
+    DrawRectangleLinesEx(dr, 1.5f, (Color){ 70, 210, 255, 160 });
 
     if (s_legend_t < 0.25f) return;
 
@@ -1305,7 +1347,7 @@ static void draw_legend(void)
         if (i > 0)
             DrawLine((int)(dr.x + pad), ry,
                      (int)(dr.x + dr.width - pad), ry,
-                     (Color){ 60, 70, 90, 160 });
+                     (Color){ 70, 210, 255, 60 });
 
         /* mini diagram */
         if (s_cells[i] != NULL) {
@@ -1338,10 +1380,10 @@ static void draw_legend(void)
 
         DrawText(s_names[i], text_x,
                  ry + (row_h / 2 - name_fs) / 2,
-                 name_fs, (Color){ 220, 225, 235, 240 });
+                 name_fs, (Color){ 255, 255, 255, 245 });
         DrawText(s_descs[i], text_x,
                  ry + row_h / 2,
-                 desc_fs, (Color){ 140, 150, 170, 200 });
+                 desc_fs, (Color){ 150, 200, 220, 200 });
 
         /* pts label right-aligned */
         char pts_buf[24];
@@ -1543,10 +1585,13 @@ static void draw_score_popups(void)
 
         /* drop shadow */
         DrawText(buf, (int)cx - lw / 2 + 2, (int)cy + 2, fs,
-                 (Color){ 0, 0, 0, (unsigned char)(a / 2) });
-        /* main text — warm gold */
+                 (Color){ 0, 0, 0, (unsigned char)(a * 2 / 3) });
+        /* outer glow in magenta */
+        DrawText(buf, (int)cx - lw / 2 - 1, (int)cy - 1, fs,
+                 (Color){ 220, 80, 255, (unsigned char)(a / 3) });
+        /* main text — vivid gold */
         DrawText(buf, (int)cx - lw / 2, (int)cy, fs,
-                 (Color){ 255, 215, 60, a });
+                 (Color){ 255, 230, 60, a });
     }
 }
 
@@ -1580,7 +1625,7 @@ static void draw_end_game(void)
 
 static void RealmWalkDraw(void)
 {
-    ClearBackground((Color){ 34, 40, 49, 255 });
+    ClearBackground((Color){ 0, 0, 0, 255 });
     draw_map_tiles();
     draw_trail();
     draw_scan_flash();
