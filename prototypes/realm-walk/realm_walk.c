@@ -597,7 +597,8 @@ static const int s_cr_drs[] = { 0, 1, 1, 1, 2 };
 
 static void detect_structures(void)
 {
-    clear_structures();
+    /* Does NOT clear existing structures. Locked cells (s_cell_struct >= 0)
+     * are skipped by every try_* function, preserving formed structures. */
 
     /* 3×3 ring patterns first — largest and most specific */
     for (int r = 1; r < MAP_ROWS - 1; r++)
@@ -656,56 +657,39 @@ static void detect_structures(void)
 
 static void scan_matches(void)
 {
-    /* Snapshot structures that survived from previous turns (positions already
-     * updated by any shift_structure calls made during this turn). */
-    int prev_count = s_structure_count;
-    Structure prev_structs[MAX_STRUCTURES];
-    for (int i = 0; i < prev_count; i++)
-        prev_structs[i] = s_structures[i];
+    int base = s_structure_count;   /* locked structures from previous turns */
 
-    detect_structures();   /* clears + re-detects all valid patterns */
+    /* Detect new patterns — locked cells (s_cell_struct >= 0) prevent reuse */
+    detect_structures();
 
-    /* Keep newly detected structures where the hero walked this turn. */
-    int kept = 0;
-    Structure kept_structs[MAX_STRUCTURES];
-    for (int i = 0; i < s_structure_count; i++) {
+    /* Of the newly detected structures (indices base..s_structure_count-1),
+     * keep only those where the hero walked EVERY cell this turn.
+     * Requiring all cells prevents a wrong-orientation pattern from
+     * grabbing a shared cell and blocking the intended shape. */
+    int kept = base;
+    for (int i = base; i < s_structure_count; i++) {
         Structure *s = &s_structures[i];
-        bool touched = false;
-        for (int ci = 0; ci < s->cell_count && !touched; ci++)
-            if (s_visited_cell[s->row + s->cell_dr[ci]][s->col + s->cell_dc[ci]])
-                touched = true;
-        if (touched)
-            kept_structs[kept++] = *s;
-    }
-
-    /* Rebuild index from newly formed structures first. */
-    s_structure_count = 0;
-    for (int r = 0; r < MAP_ROWS; r++)
-        for (int c = 0; c < MAP_COLS; c++)
-            s_cell_struct[r][c] = -1;
-    for (int i = 0; i < kept; i++) {
-        s_structures[s_structure_count] = kept_structs[i];
-        for (int ci = 0; ci < kept_structs[i].cell_count; ci++)
-            s_cell_struct[kept_structs[i].row + kept_structs[i].cell_dr[ci]]
-                         [kept_structs[i].col + kept_structs[i].cell_dc[ci]] = s_structure_count;
-        s_structure_count++;
-    }
-
-    /* Re-add structures from previous turns that don't overlap new ones. */
-    for (int pi = 0; pi < prev_count && s_structure_count < MAX_STRUCTURES; pi++) {
-        Structure *s = &prev_structs[pi];
-        bool conflict = false;
-        for (int ci = 0; ci < s->cell_count && !conflict; ci++)
-            if (s_cell_struct[s->row + s->cell_dr[ci]][s->col + s->cell_dc[ci]] >= 0)
-                conflict = true;
-        if (!conflict) {
-            s_structures[s_structure_count] = *s;
+        bool all_walked = true;
+        for (int ci = 0; ci < s->cell_count && all_walked; ci++)
+            if (!s_visited_cell[s->row + s->cell_dr[ci]][s->col + s->cell_dc[ci]])
+                all_walked = false;
+        if (all_walked) {
+            if (kept != i) {
+                /* Compact: update s_cell_struct to the new (lower) index */
+                for (int ci = 0; ci < s->cell_count; ci++)
+                    s_cell_struct[s->row + s->cell_dr[ci]]
+                                 [s->col + s->cell_dc[ci]] = kept;
+                s_structures[kept] = *s;
+            }
+            kept++;
+        } else {
+            /* Release cells so the locked-tile check stays accurate */
             for (int ci = 0; ci < s->cell_count; ci++)
                 s_cell_struct[s->row + s->cell_dr[ci]]
-                             [s->col + s->cell_dc[ci]] = s_structure_count;
-            s_structure_count++;
+                             [s->col + s->cell_dc[ci]] = -1;
         }
     }
+    s_structure_count = kept;
 }
 
 static void spawn_popup(float tile_col, float tile_row, int value)
@@ -824,7 +808,6 @@ static void on_down(Vector2 pos)
     memset(s_col_visited,   0, sizeof(s_col_visited));
     memset(s_row_visited,   0, sizeof(s_row_visited));
     memset(s_visited_cell,  0, sizeof(s_visited_cell));
-    s_visited_cell[s_hero_row][s_hero_col] = true;
     record_visited(s_hero_col, s_hero_row);
     s_vp_col_prev = s_vp_col;
     s_vp_row_prev = s_vp_row;
@@ -1590,8 +1573,7 @@ static void RealmWalkInit(void)
     s_prev_tc       = 0;
     s_prev_touch    = (Vector2){ -1.0f, -1.0f };
 
-    /* Hero position is set — now detect any initial structures */
-    detect_structures();
+    /* No structures pre-exist at game start; detection happens at turn-end. */
 }
 
 static void RealmWalkUpdate(float dt)
