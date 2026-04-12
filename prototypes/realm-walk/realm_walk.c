@@ -857,7 +857,77 @@ static void on_up(Vector2 pos)
     }
 }
 
+static const Terrain STRUCT_TERRAIN[STRUCT_TYPE_COUNT] = {
+    TERRAIN_PLAINS,    /* NONE           */
+    TERRAIN_FOREST,    /* DENSE_FOREST   */
+    TERRAIN_PLAINS,    /* FARM           */
+    TERRAIN_MOUNTAIN,  /* CASTLE         */
+    TERRAIN_CITY,      /* LUMBER_CAMP    */
+    TERRAIN_WATER,     /* RIVER          */
+    TERRAIN_PLAINS,    /* WHEAT_FIELD    */
+    TERRAIN_CITY,      /* ROAD           */
+    TERRAIN_MOUNTAIN,  /* QUARRY         */
+    TERRAIN_FOREST,    /* FOREST_CORNER  */
+    TERRAIN_WATER,     /* RIVER_BEND     */
+    TERRAIN_CITY,      /* CROSSROADS     */
+};
+
 /* --------------------------------------------------------------- rendering */
+
+/* Draw a terrain-specific icon centered at (cx, cy), scaled by s (= tw/3). */
+static void draw_terrain_icon(int cx, int cy, int s, Terrain t, Color c)
+{
+    switch (t) {
+    case TERRAIN_PLAINS:
+        /* circle dot */
+        DrawCircle(cx, cy, s * 42 / 100, c);
+        break;
+    case TERRAIN_FOREST:
+        /* tree: upward triangle canopy + small trunk */
+        DrawTriangle(
+            (Vector2){ (float)cx,           (float)(cy - s * 58 / 100) },
+            (Vector2){ (float)(cx + s),     (float)(cy + s * 42 / 100) },
+            (Vector2){ (float)(cx - s),     (float)(cy + s * 42 / 100) }, c);
+        DrawRectangle(cx - s * 14 / 100, cy + s * 42 / 100,
+                      s * 28 / 100, s * 22 / 100, c);
+        break;
+    case TERRAIN_MOUNTAIN:
+        /* main peak */
+        DrawTriangle(
+            (Vector2){ (float)cx,             (float)(cy - s * 68 / 100) },
+            (Vector2){ (float)(cx + s),       (float)(cy + s * 32 / 100) },
+            (Vector2){ (float)(cx - s),       (float)(cy + s * 32 / 100) }, c);
+        /* second smaller peak behind-left */
+        DrawTriangle(
+            (Vector2){ (float)(cx - s * 42 / 100), (float)(cy - s * 28 / 100) },
+            (Vector2){ (float)(cx + s * 10 / 100), (float)(cy + s * 32 / 100) },
+            (Vector2){ (float)(cx - s * 115 / 100),(float)(cy + s * 32 / 100) },
+            (Color){ c.r, c.g, c.b, 150 });
+        break;
+    case TERRAIN_CITY:
+        /* building: wide base + narrow tower */
+        DrawRectangle(cx - s * 46 / 100, cy - s * 15 / 100,
+                      s * 92 / 100, s * 50 / 100, c);
+        DrawRectangle(cx - s * 16 / 100, cy - s * 58 / 100,
+                      s * 32 / 100, s * 43 / 100, c);
+        /* window cutout */
+        DrawRectangle(cx - s * 10 / 100, cy - s *  8 / 100,
+                      s * 20 / 100, s * 28 / 100, (Color){ 0, 0, 0, 200 });
+        break;
+    case TERRAIN_WATER:
+        /* two staggered wave bars */
+        {
+            int wh = s * 18 / 100; if (wh < 2) wh = 2;
+            int ww = s * 56 / 100; if (ww < 3) ww = 3;
+            DrawRectangle(cx - ww - ww / 4, cy - wh * 2, ww, wh, c);
+            DrawRectangle(cx + ww / 4,      cy - wh * 2, ww, wh, (Color){ c.r, c.g, c.b, 180 });
+            DrawRectangle(cx - ww,          cy,           ww, wh, c);
+            DrawRectangle(cx,               cy,           ww, wh, (Color){ c.r, c.g, c.b, 180 });
+        }
+        break;
+    default: break;
+    }
+}
 
 static void draw_map_tiles(void)
 {
@@ -875,24 +945,20 @@ static void draw_map_tiles(void)
             if (col == s_hero_col && row == s_hero_row) continue;
             if (s_cell_struct[row][col] >= 0) continue;
             if (s_cell_flying_dst[row][col]) continue;   /* animated tile en-route */
-            int   sx = (int)((col - s_vp_vis_col) * ts);
-            int   sy = (int)((row - s_vp_vis_row) * ts);
-            int   tw = ts - 2;   /* 2px OLED-black gap between tiles */
+            /* 4px OLED-black gap; tile = outline border + terrain icon, no fill */
+            int   inset = ts / 10; if (inset < 2) inset = 2;
+            int   sx = (int)((col - s_vp_vis_col) * ts) + inset;
+            int   sy = (int)((row - s_vp_vis_row) * ts) + inset;
+            int   tw = ts - inset * 2;
             Color c  = TERRAIN_COLOR[s_map[row][col]];
-            DrawRectangleRounded(
+            float bw = (float)(tw * 8 / 100); if (bw < 2.0f) bw = 2.0f;
+            DrawRectangleLinesEx(
                 (Rectangle){ (float)sx, (float)sy, (float)tw, (float)tw },
-                0.18f, 4, c);
-            /* top-left bevel highlight */
-            unsigned char hr = (unsigned char)fminf(c.r + 70.0f, 255.0f);
-            unsigned char hg = (unsigned char)fminf(c.g + 70.0f, 255.0f);
-            unsigned char hb = (unsigned char)fminf(c.b + 70.0f, 255.0f);
-            DrawRectangle(sx + 1, sy + 1, tw - 2, 2, (Color){ hr, hg, hb, 90 });
-            DrawRectangle(sx + 1, sy + 1, 2, tw - 2, (Color){ hr, hg, hb, 60 });
-            char letter[2] = { TERRAIN_LETTER[s_map[row][col]], '\0' };
-            int  fs = ts * 26 / 100;
-            int  lw = MeasureText(letter, fs);
-            DrawText(letter, sx + (tw - lw) / 2, sy + (tw - fs) / 2,
-                     fs, (Color){ 0, 0, 0, 110 });
+                bw, c);
+            int icx = sx + tw / 2;
+            int icy = sy + tw / 2;
+            int s   = tw / 3;
+            draw_terrain_icon(icx, icy, s, s_map[row][col], c);
         }
     }
 
@@ -904,25 +970,25 @@ static void draw_map_tiles(void)
         if (s->row + s->h <= s_vp_row - 1 || s->row >= s_vp_row + vr + 1) continue;
 
         Color col = STRUCT_COLOR[s->type];
-        int tw = ts - 2;
-        /* glow color: slightly brighter than base */
-        unsigned char gr = (unsigned char)fminf(col.r + 60.0f, 255.0f);
-        unsigned char gg = (unsigned char)fminf(col.g + 60.0f, 255.0f);
-        unsigned char gb = (unsigned char)fminf(col.b + 60.0f, 255.0f);
+        int inset = ts / 10; if (inset < 2) inset = 2;
+        int tw    = ts - inset * 2;
+        Terrain st = STRUCT_TERRAIN[s->type];
         for (int ci = 0; ci < s->cell_count; ci++) {
-            int cx = (int)((s->col + s->cell_dc[ci] - s_vp_vis_col) * ts);
-            int cy = (int)((s->row + s->cell_dr[ci] - s_vp_vis_row) * ts);
-            /* outer glow halo */
+            int ox = (int)((s->col + s->cell_dc[ci] - s_vp_vis_col) * ts) + inset;
+            int oy = (int)((s->row + s->cell_dr[ci] - s_vp_vis_row) * ts) + inset;
+            /* faint outer glow */
             DrawRectangleRounded(
-                (Rectangle){ (float)(cx-2), (float)(cy-2), (float)(tw+4), (float)(tw+4) },
-                0.28f, 4, (Color){ col.r, col.g, col.b, 55 });
-            /* main cell */
+                (Rectangle){ (float)(ox - 3), (float)(oy - 3),
+                             (float)(tw + 6), (float)(tw + 6) },
+                0.30f, 4, (Color){ col.r, col.g, col.b, 50 });
+            /* solid filled cell */
             DrawRectangleRounded(
-                (Rectangle){ (float)cx, (float)cy, (float)tw, (float)tw },
+                (Rectangle){ (float)ox, (float)oy, (float)tw, (float)tw },
                 0.20f, 4, col);
-            /* top-left bevel highlight */
-            DrawRectangle(cx + 1, cy + 1, tw - 2, 2, (Color){ gr, gg, gb, 120 });
-            DrawRectangle(cx + 1, cy + 1, 2, tw - 2, (Color){ gr, gg, gb, 80 });
+            /* white terrain icon inside */
+            int icx = ox + tw / 2;
+            int icy = oy + tw / 2;
+            draw_terrain_icon(icx, icy, tw / 3, st, (Color){ 0, 0, 0, 140 });
         }
 
         /* Label centered on bounding box */
@@ -967,15 +1033,18 @@ static void draw_trail(void)
         unsigned char tr = (unsigned char)(80  + (int)(175 * gradient_t));
         unsigned char tg = (unsigned char)(200 + (int)( 20 * gradient_t));
         unsigned char tb = (unsigned char)(255 - (int)(195 * gradient_t));
-        int tw = ts - 2;
+        int inset = ts / 10; if (inset < 2) inset = 2;
+        int tw    = ts - inset * 2;
+        float bw  = (float)(tw * 8 / 100); if (bw < 2.0f) bw = 2.0f;
+        /* trail uses filled tile so the path reads clearly on the black grid */
         DrawRectangleRounded(
-            (Rectangle){ (float)sx, (float)sy, (float)tw, (float)tw },
+            (Rectangle){ (float)sx + inset, (float)sy + inset, (float)tw, (float)tw },
             0.18f, 4, (Color){ tr, tg, tb, (unsigned char)alpha });
-        /* glowing border on the most recent TRAIL_BORDER_RECENT tiles */
+        /* brighter border on the most recent TRAIL_BORDER_RECENT tiles */
         if (i >= s_trail_len - TRAIL_BORDER_RECENT) {
             DrawRectangleLinesEx(
-                (Rectangle){ (float)sx, (float)sy, (float)tw, (float)tw },
-                2.0f, (Color){ tr, tg, tb, (unsigned char)(alpha * 3 / 4) });
+                (Rectangle){ (float)sx + inset, (float)sy + inset, (float)tw, (float)tw },
+                bw, (Color){ 255, 255, 255, (unsigned char)(alpha * 3 / 4) });
         }
     }
 }
@@ -1020,20 +1089,19 @@ static void draw_flying_tiles(void)
         int sx = (int)((ft->vis_col - s_vp_vis_col) * ts);
         int sy = (int)((ft->vis_row - s_vp_vis_row) * ts);
         if (sx + ts < 0 || sx > sw || sy + ts < 0 || sy > sh) continue;
-        int   tw = ts - 2;
+        int   inset = ts / 10; if (inset < 2) inset = 2;
+        int   tw = ts - inset * 2;
+        int   ox = sx + inset, oy = sy + inset;
         Color tc = TERRAIN_COLOR[ft->terrain];
-        DrawRectangleRounded(
-            (Rectangle){ (float)sx, (float)sy, (float)tw, (float)tw },
-            0.18f, 4, tc);
-        /* bright white border signals tile is in motion */
+        float bw = (float)(tw * 8 / 100); if (bw < 2.0f) bw = 2.0f;
+        /* white border = tile in motion */
         DrawRectangleLinesEx(
-            (Rectangle){ (float)sx, (float)sy, (float)tw, (float)tw },
-            2.5f, (Color){ 255, 255, 255, 200 });
-        char letter[2] = { TERRAIN_LETTER[ft->terrain], '\0' };
-        int  fs = ts * 26 / 100;
-        int  lw = MeasureText(letter, fs);
-        DrawText(letter, sx + (tw - lw) / 2, sy + (tw - fs) / 2,
-                 fs, (Color){ 0, 0, 0, 110 });
+            (Rectangle){ (float)ox, (float)oy, (float)tw, (float)tw },
+            bw + 1.0f, (Color){ 255, 255, 255, 220 });
+        DrawRectangleLinesEx(
+            (Rectangle){ (float)ox, (float)oy, (float)tw, (float)tw },
+            bw, tc);
+        draw_terrain_icon(ox + tw / 2, oy + tw / 2, tw / 3, ft->terrain, tc);
     }
 }
 
