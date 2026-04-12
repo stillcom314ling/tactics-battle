@@ -45,7 +45,7 @@
 #define PT_CASTLE        18          /* Castle (3×3 Mountain+Water)     */
 #define MAX_STRUCT_CELLS 9           /* max cells in any structure shape */
 #define TURNS_LIMIT      15          /* turns before game ends          */
-#define SCORE_GOAL       600         /* score needed to win             */
+#define SCORE_GOAL       3000        /* score needed to win             */
 #define POPUP_LIFETIME   1.4f        /* seconds a score popup lives     */
 #define POPUP_FLOAT      2.2f        /* cells upward over its lifetime  */
 #define MAX_SCORE_POPUPS 16
@@ -152,6 +152,8 @@ static Structure s_structures[MAX_STRUCTURES];
 static int       s_structure_count;
 /* per-cell index into s_structures; -1 when not part of a structure */
 static int       s_cell_struct[MAP_ROWS][MAP_COLS];
+/* cells the hero stepped on this turn — structures only form here */
+static bool      s_visited_cell[MAP_ROWS][MAP_COLS];
 
 /* ---- animation state ---- */
 static float s_hero_vis_col, s_hero_vis_row;  /* lerps toward s_hero_col/row */
@@ -421,6 +423,7 @@ static bool advance_hero(int new_col, int new_row)
     s_hero_col = new_col;
     s_hero_row = new_row;
     s_hero_bump = BUMP_SCALE_PEAK - 1.0f;
+    s_visited_cell[new_row][new_col] = true;
 
     record_visited(new_col, new_row);
 
@@ -649,8 +652,33 @@ static void detect_structures(void)
 
 static void scan_matches(void)
 {
-    /* Match-3 consuming patterns are disabled — we only form structures. */
     detect_structures();
+
+    /* Keep only structures that include at least one cell the hero touched
+     * this turn. Patterns in areas the hero never walked are discarded. */
+    int kept = 0;
+    Structure kept_structs[MAX_STRUCTURES];
+    for (int i = 0; i < s_structure_count; i++) {
+        Structure *s = &s_structures[i];
+        bool touched = false;
+        for (int ci = 0; ci < s->cell_count && !touched; ci++)
+            if (s_visited_cell[s->row + s->cell_dr[ci]][s->col + s->cell_dc[ci]])
+                touched = true;
+        if (touched)
+            kept_structs[kept++] = *s;
+    }
+    /* Rebuild the structures array and s_cell_struct index */
+    s_structure_count = 0;
+    for (int r = 0; r < MAP_ROWS; r++)
+        for (int c = 0; c < MAP_COLS; c++)
+            s_cell_struct[r][c] = -1;
+    for (int i = 0; i < kept; i++) {
+        s_structures[i] = kept_structs[i];
+        s_structure_count++;
+        for (int ci = 0; ci < s_structures[i].cell_count; ci++)
+            s_cell_struct[s_structures[i].row + s_structures[i].cell_dr[ci]]
+                         [s_structures[i].col + s_structures[i].cell_dc[ci]] = i;
+    }
 }
 
 static void spawn_popup(float tile_col, float tile_row, int value)
@@ -766,8 +794,10 @@ static void on_down(Vector2 pos)
     s_trail_len         = 0;
     s_scanned_col_count = 0;
     s_scanned_row_count = 0;
-    memset(s_col_visited, 0, sizeof(s_col_visited));
-    memset(s_row_visited, 0, sizeof(s_row_visited));
+    memset(s_col_visited,   0, sizeof(s_col_visited));
+    memset(s_row_visited,   0, sizeof(s_row_visited));
+    memset(s_visited_cell,  0, sizeof(s_visited_cell));
+    s_visited_cell[s_hero_row][s_hero_col] = true;
     record_visited(s_hero_col, s_hero_row);
     s_vp_col_prev = s_vp_col;
     s_vp_row_prev = s_vp_row;
@@ -1379,6 +1409,7 @@ static void RealmWalkInit(void)
 
     memset(s_col_visited,   0, sizeof(s_col_visited));
     memset(s_row_visited,   0, sizeof(s_row_visited));
+    memset(s_visited_cell,  0, sizeof(s_visited_cell));
 
     s_flash_count   = 0;
     s_move_cd       = 0.0f;
