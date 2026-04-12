@@ -485,6 +485,7 @@ static bool try_2x2(StructureType type, Terrain t, int c, int r)
         if (s_cell_struct[cr][cc] >= 0)    return false;
         if (s_map[cr][cc] != t)            return false;
         if (!s_visited_cell[cr][cc])       return false;
+        if (cell_has_hero(cc, cr))         return false;
     }
     return add_structure_cells(type, dcs, drs, 4, c, r);
 }
@@ -508,8 +509,9 @@ static bool try_ring_3x3(StructureType type,
     int n = 0;
     for (int r = 0; r < 3; r++)
         for (int c = 0; c < 3; c++) {
-            if (s_cell_struct[ar + r][ac + c] >= 0)  return false;
-            if (!s_visited_cell[ar + r][ac + c])      return false;
+            if (s_cell_struct[ar + r][ac + c] >= 0)   return false;
+            if (!s_visited_cell[ar + r][ac + c])       return false;
+            if (cell_has_hero(ac + c, ar + r))         return false;
             dcs[n] = c; drs[n] = r; n++;
         }
     return add_structure_cells(type, dcs, drs, 9, ac, ar);
@@ -532,6 +534,7 @@ static bool try_row(StructureType type, Terrain t,
             if (s_cell_struct[r + dr][c + dc] >= 0) return false;
             if (s_map[r + dr][c + dc] != t)         return false;
             if (!s_visited_cell[r + dr][c + dc])    return false;
+            if (cell_has_hero(c + dc, r + dr))      return false;
             dcs[n] = dc; drs[n] = dr; n++;
         }
     return add_structure_cells(type, dcs, drs, n, c, r);
@@ -578,6 +581,7 @@ static bool try_shape(StructureType type, Terrain t,
                 else if (s_map[cr][cc] != t)         ok = false;
                 else if (s_cell_struct[cr][cc] >= 0) ok = false;
                 else if (!s_visited_cell[cr][cc])    ok = false;
+                else if (cell_has_hero(cc, cr))      ok = false;
             }
             if (ok) return add_structure_cells(type, ndcs, ndrs, n, ac, ar);
 
@@ -783,6 +787,7 @@ static void on_down(Vector2 pos)
     memset(s_col_visited,   0, sizeof(s_col_visited));
     memset(s_row_visited,   0, sizeof(s_row_visited));
     memset(s_visited_cell,  0, sizeof(s_visited_cell));
+    s_visited_cell[s_hero_row][s_hero_col] = true;
     record_visited(s_hero_col, s_hero_row);
     s_vp_col_prev = s_vp_col;
     s_vp_row_prev = s_vp_row;
