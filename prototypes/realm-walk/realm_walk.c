@@ -1276,24 +1276,39 @@ static void draw_resource_strip(void)
 }
 
 /* Draw a mini flat terrain grid for legend entries. */
-static void draw_legend_grid(int x, int y, int cs,
-                              const Terrain *cells, int cols, int rows)
+/* Draw one legend tile: hollow border + terrain icon. If t == filler, ghost only. */
+static void draw_legend_tile(int tx, int ty, int cs, Terrain t, Terrain filler)
 {
-    for (int r = 0; r < rows; r++) {
-        for (int c = 0; c < cols; c++) {
-            Terrain t = cells[r * cols + c];
-            DrawRectangle(x + c * cs, y + r * cs, cs - 1, cs - 1,
-                          TERRAIN_COLOR[t]);
-            char ltr[2] = { TERRAIN_LETTER[t], '\0' };
-            int  lfs = cs * 38 / 100;
-            if (lfs < 6) lfs = 6;
-            int  lw  = MeasureText(ltr, lfs);
-            DrawText(ltr,
-                     x + c * cs + (cs - lw)  / 2,
-                     y + r * cs + (cs - lfs) / 2,
-                     lfs, (Color){ 0, 0, 0, 100 });
-        }
+    int inset = cs / 9; if (inset < 1) inset = 1;
+    int ti    = cs - 1 - inset * 2;
+    int tcx   = tx + inset;
+    int tcy   = ty + inset;
+
+    if (t == filler) {
+        /* ghost: dim outline only to show grid slot */
+        DrawRectangleLinesEx(
+            (Rectangle){ (float)tcx, (float)tcy, (float)ti, (float)ti },
+            1.0f, (Color){ 50, 55, 70, 100 });
+        return;
     }
+
+    Color c  = TERRAIN_COLOR[t];
+    float bw = (float)(ti * 9 / 100); if (bw < 1.5f) bw = 1.5f;
+    DrawRectangleLinesEx(
+        (Rectangle){ (float)tcx, (float)tcy, (float)ti, (float)ti },
+        bw, c);
+    int s = ti / 3; if (s >= 3)
+        draw_terrain_icon(tcx + ti / 2, tcy + ti / 2, s, t, c);
+}
+
+static void draw_legend_grid(int x, int y, int cs,
+                              const Terrain *cells, int cols, int rows,
+                              Terrain filler)
+{
+    for (int r = 0; r < rows; r++)
+        for (int c = 0; c < cols; c++)
+            draw_legend_tile(x + c * cs, y + r * cs, cs,
+                             cells[r * cols + c], filler);
 }
 
 static void draw_legend(void)
@@ -1399,6 +1414,13 @@ static void draw_legend(void)
     /* g_cols and g_rows per entry */
     static const int s_gc[12] = { 2, 2, 3, 3, 4, 3, 3, 3, 2, 2, 3, 1 };
     static const int s_gr[12] = { 2, 2, 3, 3, 1, 1, 1, 1, 2, 3, 3, 1 };
+    /* filler terrain used as empty-slot marker in diagrams (TERRAIN_COUNT = none) */
+    static const Terrain s_filler[12] = {
+        TERRAIN_COUNT, TERRAIN_COUNT, TERRAIN_COUNT, TERRAIN_COUNT,
+        TERRAIN_COUNT, TERRAIN_COUNT, TERRAIN_COUNT, TERRAIN_COUNT,
+        TERRAIN_PLAINS, TERRAIN_PLAINS, TERRAIN_PLAINS,
+        TERRAIN_COUNT
+    };
     const Terrain *s_cells[12] = {
         s_forest_cells, s_farm_cells, s_castle_cells, s_lumber_cells,
         s_river_cells, s_wheat_cells, s_road_cells, s_quarry_cells,
@@ -1425,18 +1447,29 @@ static void draw_legend(void)
             if (cs < 4) cs = 4;
             int gx = (int)(dr.x + pad) + (diagram_w - gc * cs) / 2;
             int gy = ry + (row_h - gr * cs) / 2;
-            draw_legend_grid(gx, gy, cs, s_cells[i], gc, gr);
+            draw_legend_grid(gx, gy, cs, s_cells[i], gc, gr, s_filler[i]);
         } else {
-            /* trail: hero glyph */
-            int cs = diagram_w / 3;
+            /* trail: mini hero tile */
+            int cs = diagram_w * 2 / 3;
             int gx = (int)(dr.x + pad) + (diagram_w - cs) / 2;
             int gy = ry + (row_h - cs) / 2;
-            DrawRectangle(gx, gy, cs - 1, cs - 1, (Color){ 240, 220, 100, 255 });
-            int hfs = cs * 55 / 100;
+            /* outer glow */
+            DrawRectangleRounded(
+                (Rectangle){ (float)(gx - 2), (float)(gy - 2),
+                             (float)(cs + 4), (float)(cs + 4) },
+                0.30f, 4, (Color){ 220, 100, 255, 50 });
+            /* white hero tile */
+            DrawRectangleRounded(
+                (Rectangle){ (float)gx, (float)gy, (float)cs, (float)cs },
+                0.22f, 4, (Color){ 255, 255, 255, 255 });
+            DrawRectangleLinesEx(
+                (Rectangle){ (float)gx, (float)gy, (float)cs, (float)cs },
+                2.0f, (Color){ 220, 80, 255, 255 });
+            int hfs = cs * 50 / 100;
             if (hfs < 6) hfs = 6;
-            int hw = MeasureText("H", hfs);
-            DrawText("H", gx + (cs - hw) / 2, gy + (cs - hfs) / 2,
-                     hfs, (Color){ 80, 50, 10, 200 });
+            int hw = MeasureText("@", hfs);
+            DrawText("@", gx + (cs - hw) / 2, gy + (cs - hfs) / 2,
+                     hfs, (Color){ 40, 0, 60, 200 });
         }
 
         /* name + description */
