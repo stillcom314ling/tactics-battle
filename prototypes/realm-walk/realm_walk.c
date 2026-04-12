@@ -484,7 +484,6 @@ static bool try_2x2(StructureType type, Terrain t, int c, int r)
         int cc = c + dcs[i], cr = r + drs[i];
         if (s_cell_struct[cr][cc] >= 0) return false;
         if (s_map[cr][cc] != t)         return false;
-        if (cell_has_hero(cc, cr))      return false;
     }
     return add_structure_cells(type, dcs, drs, 4, c, r);
 }
@@ -509,7 +508,6 @@ static bool try_ring_3x3(StructureType type,
     for (int r = 0; r < 3; r++)
         for (int c = 0; c < 3; c++) {
             if (s_cell_struct[ar + r][ac + c] >= 0) return false;
-            if (cell_has_hero(ac + c, ar + r))      return false;
             dcs[n] = c; drs[n] = r; n++;
         }
     return add_structure_cells(type, dcs, drs, 9, ac, ar);
@@ -531,7 +529,6 @@ static bool try_row(StructureType type, Terrain t,
         for (int dc = 0; dc < w; dc++) {
             if (s_cell_struct[r + dr][c + dc] >= 0) return false;
             if (s_map[r + dr][c + dc] != t)         return false;
-            if (cell_has_hero(c + dc, r + dr))      return false;
             dcs[n] = dc; drs[n] = dr; n++;
         }
     return add_structure_cells(type, dcs, drs, n, c, r);
@@ -540,42 +537,49 @@ static bool try_row(StructureType type, Terrain t,
 /* Rotate (dc, dr) 90° clockwise in screen space (y-down): (dc,dr) → (-dr, dc) */
 static void rot90(int *dc, int *dr) { int t = *dc; *dc = -(*dr); *dr = t; }
 
-/* Try all 4 rotations of an arbitrary cell-offset shape at anchor (ac, ar).
- * Normalises each rotation so the bounding box starts at (0,0).
- * Returns true (and registers the structure) as soon as one rotation fits. */
+/* Try all 8 orientations (4 rotations × original + horizontal mirror) of a
+ * cell-offset shape at anchor (ac, ar). Normalises each so min offset = (0,0).
+ * Symmetric shapes produce duplicate normalised layouts on the mirror pass;
+ * those attempts simply fail the s_cell_struct check and are skipped. */
 static bool try_shape(StructureType type, Terrain t,
                       const int *base_dcs, const int *base_drs, int n,
                       int ac, int ar)
 {
     int dcs[MAX_STRUCT_CELLS], drs[MAX_STRUCT_CELLS];
-    for (int i = 0; i < n; i++) { dcs[i] = base_dcs[i]; drs[i] = base_drs[i]; }
 
-    for (int rot = 0; rot < 4; rot++) {
-        /* Normalise: shift so min_dc = 0, min_dr = 0 */
-        int min_dc = dcs[0], min_dr = drs[0];
-        for (int i = 1; i < n; i++) {
-            if (dcs[i] < min_dc) min_dc = dcs[i];
-            if (drs[i] < min_dr) min_dr = drs[i];
-        }
-        int ndcs[MAX_STRUCT_CELLS], ndrs[MAX_STRUCT_CELLS];
+    for (int pass = 0; pass < 2; pass++) {
+        /* pass 0 = original, pass 1 = horizontally mirrored (dc → -dc) */
         for (int i = 0; i < n; i++) {
-            ndcs[i] = dcs[i] - min_dc;
-            ndrs[i] = drs[i] - min_dr;
+            dcs[i] = (pass == 0) ? base_dcs[i] : -base_dcs[i];
+            drs[i] = base_drs[i];
         }
 
-        /* Bounds, terrain, structure, hero checks */
-        bool ok = true;
-        for (int i = 0; i < n && ok; i++) {
-            int cc = ac + ndcs[i], cr = ar + ndrs[i];
-            if (cc < 0 || cc >= MAP_COLS || cr < 0 || cr >= MAP_ROWS) ok = false;
-            else if (s_map[cr][cc] != t)         ok = false;
-            else if (s_cell_struct[cr][cc] >= 0) ok = false;
-            else if (cell_has_hero(cc, cr))      ok = false;
-        }
-        if (ok) return add_structure_cells(type, ndcs, ndrs, n, ac, ar);
+        for (int rot = 0; rot < 4; rot++) {
+            /* Normalise: shift so min_dc = 0, min_dr = 0 */
+            int min_dc = dcs[0], min_dr = drs[0];
+            for (int i = 1; i < n; i++) {
+                if (dcs[i] < min_dc) min_dc = dcs[i];
+                if (drs[i] < min_dr) min_dr = drs[i];
+            }
+            int ndcs[MAX_STRUCT_CELLS], ndrs[MAX_STRUCT_CELLS];
+            for (int i = 0; i < n; i++) {
+                ndcs[i] = dcs[i] - min_dc;
+                ndrs[i] = drs[i] - min_dr;
+            }
 
-        /* Rotate for next iteration */
-        for (int i = 0; i < n; i++) rot90(&dcs[i], &drs[i]);
+            /* Bounds, terrain, and structure checks */
+            bool ok = true;
+            for (int i = 0; i < n && ok; i++) {
+                int cc = ac + ndcs[i], cr = ar + ndrs[i];
+                if (cc < 0 || cc >= MAP_COLS || cr < 0 || cr >= MAP_ROWS) ok = false;
+                else if (s_map[cr][cc] != t)         ok = false;
+                else if (s_cell_struct[cr][cc] >= 0) ok = false;
+            }
+            if (ok) return add_structure_cells(type, ndcs, ndrs, n, ac, ar);
+
+            /* Rotate for next iteration */
+            for (int i = 0; i < n; i++) rot90(&dcs[i], &drs[i]);
+        }
     }
     return false;
 }
