@@ -480,13 +480,15 @@ static bool try_2x2(StructureType type, Terrain t, int c, int r)
     if (c + 2 > MAP_COLS || r + 2 > MAP_ROWS) return false;
     static const int dcs[4] = { 0, 1, 0, 1 };
     static const int drs[4] = { 0, 0, 1, 1 };
+    bool any_visited = false;
     for (int i = 0; i < 4; i++) {
         int cc = c + dcs[i], cr = r + drs[i];
         if (s_cell_struct[cr][cc] >= 0)    return false;
         if (s_map[cr][cc] != t)            return false;
-        if (!s_visited_cell[cr][cc])       return false;
         if (cell_has_hero(cc, cr))         return false;
+        if (s_visited_cell[cr][cc])        any_visited = true;
     }
+    if (!any_visited) return false;
     return add_structure_cells(type, dcs, drs, 4, c, r);
 }
 
@@ -507,13 +509,15 @@ static bool try_ring_3x3(StructureType type,
     /* Build 9-cell offset list for the 3×3 block */
     int dcs[9], drs[9];
     int n = 0;
+    bool any_visited = false;
     for (int r = 0; r < 3; r++)
         for (int c = 0; c < 3; c++) {
             if (s_cell_struct[ar + r][ac + c] >= 0)   return false;
-            if (!s_visited_cell[ar + r][ac + c])       return false;
             if (cell_has_hero(ac + c, ar + r))         return false;
+            if (s_visited_cell[ar + r][ac + c])        any_visited = true;
             dcs[n] = c; drs[n] = r; n++;
         }
+    if (!any_visited) return false;
     return add_structure_cells(type, dcs, drs, 9, ac, ar);
 }
 
@@ -529,14 +533,16 @@ static bool try_row(StructureType type, Terrain t,
     if (c + w > MAP_COLS || r + h > MAP_ROWS) return false;
     int dcs[MAX_STRUCT_CELLS], drs[MAX_STRUCT_CELLS];
     int n = 0;
+    bool any_visited = false;
     for (int dr = 0; dr < h; dr++)
         for (int dc = 0; dc < w; dc++) {
             if (s_cell_struct[r + dr][c + dc] >= 0) return false;
             if (s_map[r + dr][c + dc] != t)         return false;
-            if (!s_visited_cell[r + dr][c + dc])    return false;
             if (cell_has_hero(c + dc, r + dr))      return false;
+            if (s_visited_cell[r + dr][c + dc])     any_visited = true;
             dcs[n] = dc; drs[n] = dr; n++;
         }
+    if (!any_visited) return false;
     return add_structure_cells(type, dcs, drs, n, c, r);
 }
 
@@ -575,15 +581,16 @@ static bool try_shape(StructureType type, Terrain t,
 
             /* Bounds, terrain, structure, and visited checks */
             bool ok = true;
+            bool any_visited = false;
             for (int i = 0; i < n && ok; i++) {
                 int cc = ac + ndcs[i], cr = ar + ndrs[i];
                 if (cc < 0 || cc >= MAP_COLS || cr < 0 || cr >= MAP_ROWS) ok = false;
                 else if (s_map[cr][cc] != t)         ok = false;
                 else if (s_cell_struct[cr][cc] >= 0) ok = false;
-                else if (!s_visited_cell[cr][cc])    ok = false;
                 else if (cell_has_hero(cc, cr))      ok = false;
+                else if (s_visited_cell[cr][cc])     any_visited = true;
             }
-            if (ok) return add_structure_cells(type, ndcs, ndrs, n, ac, ar);
+            if (ok && any_visited) return add_structure_cells(type, ndcs, ndrs, n, ac, ar);
 
             /* Rotate for next iteration */
             for (int i = 0; i < n; i++) rot90(&dcs[i], &drs[i]);
