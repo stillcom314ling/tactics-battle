@@ -88,22 +88,53 @@ static bool board_full(void)
     return true;
 }
 
+static bool edge_completes_box(int is_h, int r, int c)
+{
+    if (is_h) {
+        if (r < BOX_R && c < BOX_C && !s_box[r][c] &&
+            s_h[r+1][c] && s_v[r][c] && s_v[r][c+1])
+            return true;
+        if (r > 0 && c < BOX_C && !s_box[r-1][c] &&
+            s_h[r-1][c] && s_v[r-1][c] && s_v[r-1][c+1])
+            return true;
+    } else {
+        if (r < BOX_R && c < BOX_C && !s_box[r][c] &&
+            s_h[r][c] && s_h[r+1][c] && s_v[r][c+1])
+            return true;
+        if (r < BOX_R && c > 0 && !s_box[r][c-1] &&
+            s_h[r][c-1] && s_h[r+1][c-1] && s_v[r][c-1])
+            return true;
+    }
+    return false;
+}
+
 static void do_corruption(void)
 {
-    Edge list[MAX_EDGES];
-    int  n = 0;
+    Edge all[MAX_EDGES], scoring[MAX_EDGES];
+    int  n_all = 0, n_scoring = 0;
     for (int r = 0; r < DOTS_R; r++)
         for (int c = 0; c < BOX_C; c++)
-            if (!s_h[r][c]) list[n++] = (Edge){1, r, c};
+            if (!s_h[r][c]) {
+                Edge e = {1, r, c};
+                all[n_all++] = e;
+                if (edge_completes_box(1, r, c)) scoring[n_scoring++] = e;
+            }
     for (int r = 0; r < BOX_R; r++)
         for (int c = 0; c < DOTS_C; c++)
-            if (!s_v[r][c]) list[n++] = (Edge){0, r, c};
-    if (!n) return;
-    Edge e = list[GetRandomValue(0, n - 1)];
+            if (!s_v[r][c]) {
+                Edge e = {0, r, c};
+                all[n_all++] = e;
+                if (edge_completes_box(0, r, c)) scoring[n_scoring++] = e;
+            }
+    if (!n_all) return;
+    Edge *pool   = n_scoring > 0 ? scoring : all;
+    int   pool_n = n_scoring > 0 ? n_scoring : n_all;
+    Edge  e      = pool[GetRandomValue(0, pool_n - 1)];
     if (e.is_h) s_h[e.r][e.c] = EDGE_SYSTEM;
     else        s_v[e.r][e.c] = EDGE_SYSTEM;
     check_new_boxes(EDGE_SYSTEM);
-    snprintf(s_status, sizeof(s_status), "Corruption struck!");
+    snprintf(s_status, sizeof(s_status),
+             n_scoring > 0 ? "Corruption stole a box!" : "Corruption struck!");
 }
 
 static void check_game_over(void)
