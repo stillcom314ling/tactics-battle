@@ -6,6 +6,7 @@
 #include "../prototypes/drag_disp/drag_disp.h"
 #include "../prototypes/triad/triad.h"
 #include "../prototypes/realm-walk/realm_walk.h"
+#include "../prototypes/roller-derby/roller_derby.h"
 
 #ifdef PLATFORM_WEB
 #include <emscripten/emscripten.h>
@@ -22,6 +23,7 @@ static const Prototype * const PROTOTYPES[] = {
     &DragDispProto,
     &TriadProto,
     &RealmWalkProto,
+    &RollerDerbyProto,
 };
 static const int PROTO_COUNT = (int)(sizeof(PROTOTYPES) / sizeof(PROTOTYPES[0]));
 
