@@ -28,6 +28,7 @@ typedef struct {
     int  momentum;
     bool active;
     int  cooldown;
+    int  forward_progress;  /* forward steps accumulated since spawn; gates scoring */
 } Unit;
 
 typedef struct {
@@ -101,6 +102,10 @@ static void clamp_momentum(int i)
 
 static void resolve_turn(void)
 {
+    /* Snapshot positions so we can measure forward travel for lap gating */
+    int pre_pos[UNIT_COUNT];
+    for (int i = 0; i < UNIT_COUNT; i++) pre_pos[i] = s_units[i].pos;
+
     /* Step 1 — compute target positions */
     int target_pos[UNIT_COUNT], target_lane[UNIT_COUNT], move_amount[UNIT_COUNT];
     for (int i = 0; i < UNIT_COUNT; i++) {
@@ -255,11 +260,17 @@ static void resolve_turn(void)
         s_units[i].lane = final_lane[i];
     }
 
-    /* Step 7 — jammer breakthrough check */
+    /* Step 6b — accumulate forward travel for lap gating */
+    for (int i = 0; i < UNIT_COUNT; i++) {
+        if (!s_units[i].active) continue;
+        s_units[i].forward_progress += circ_fwd(pre_pos[i], s_units[i].pos);
+    }
+
+    /* Step 7 — jammer breakthrough check (requires a full lap of forward travel) */
     for (int i = 0; i < UNIT_COUNT; i++) {
         if (!s_units[i].active) continue;
         if (!is_jammer(i)) continue;
-        if (is_jammer_through(i)) {
+        if (is_jammer_through(i) && s_units[i].forward_progress >= TRACK_LEN) {
             int t = team_of(i);
             s_score[t]++;
             s_units[i].active   = false;
@@ -275,10 +286,11 @@ static void resolve_turn(void)
         if (s_units[i].cooldown > 0) s_units[i].cooldown--;
         if (s_units[i].cooldown == 0) {
             int pc2 = pack_center();
-            s_units[i].pos      = (pc2 - 2 + TRACK_LEN) % TRACK_LEN;
-            s_units[i].lane     = 1;
-            s_units[i].momentum = 2;
-            s_units[i].active   = true;
+            s_units[i].pos              = (pc2 - 2 + TRACK_LEN) % TRACK_LEN;
+            s_units[i].lane             = 1;
+            s_units[i].momentum         = 2;
+            s_units[i].active           = true;
+            s_units[i].forward_progress = 0;
         }
     }
 }
@@ -392,10 +404,53 @@ static void draw_track(float cx, float cy, float r)
                  fs, GRAY);
     }
 
-    /* Units */
+    /* Preview arrows for the player's queued moves (drawn under units) */
     float unit_r = r * 0.08f;
-    for (int i = 0; i < UNIT_COUNT; i++) {
+    for (int i = 0; i < TEAM_SIZE; i++) {
         if (!s_units[i].active) continue;
+
+        int intent_move = 0;
+        if (s_actions[i].intent == INTENT_PUSH)  intent_move =  1;
+        if (s_actions[i].intent == INTENT_BRACE) intent_move = -1;
+        int move = 1 + intent_move;
+        if (move < 0) move = 0;
+
+        int nl = s_units[i].lane + s_actions[i].lane_delta;
+        if (nl < 0) nl = 0;
+        if (nl >= LANE_COUNT) nl = LANE_COUNT - 1;
+        int tp = (s_units[i].pos + move) % TRACK_LEN;
+
+        float a0  = -HALF_PI + TWO_PI * s_units[i].pos / TRACK_LEN;
+        float a1  = -HALF_PI + TWO_PI * tp / TRACK_LEN;
+        float lr0 = lane_radii[s_units[i].lane];
+        float lr1 = lane_radii[nl];
+        float x0  = cx + lr0 * cosf(a0), y0 = cy + lr0 * sinf(a0);
+        float x1  = cx + lr1 * cosf(a1), y1 = cy + lr1 * sinf(a1);
+
+        Color arrow_col = Fade(SKYBLUE, 0.75f);
+
+        if (move == 0 && s_actions[i].lane_delta == 0) {
+            /* Holding position — ring marker at current cell */
+            DrawCircleLinesV((Vector2){x0, y0}, unit_r + 5, arrow_col);
+            continue;
+        }
+
+        DrawLineEx((Vector2){x0, y0}, (Vector2){x1, y1}, 3.0f, arrow_col);
+
+        float ang = atan2f(y1 - y0, x1 - x0);
+        float ah  = unit_r * 0.9f;
+        Vector2 wing_l = { x1 - ah * cosf(ang - 0.45f), y1 - ah * sinf(ang - 0.45f) };
+        Vector2 wing_r = { x1 - ah * cosf(ang + 0.45f), y1 - ah * sinf(ang + 0.45f) };
+        DrawLineEx((Vector2){x1, y1}, wing_l, 3.0f, arrow_col);
+        DrawLineEx((Vector2){x1, y1}, wing_r, 3.0f, arrow_col);
+    }
+
+    /* Units */
+    const char *intent_tag[] = {"C", "P", "B", "H"};
+    for (int i = 0; i < UNIT_COUNT; i++) {
+        bool ghost = !s_units[i].active && s_units[i].cooldown > 0;
+        if (!s_units[i].active && !ghost) continue;
+
         float angle = -HALF_PI + TWO_PI * s_units[i].pos / TRACK_LEN;
         float lr = lane_radii[s_units[i].lane];
         float ux = cx + lr * cosf(angle);
@@ -406,6 +461,18 @@ static void draw_track(float cx, float cy, float r)
             col = is_jammer(i) ? BLUE : SKYBLUE;
         else
             col = is_jammer(i) ? RED : ORANGE;
+
+        if (ghost) {
+            DrawCircleLinesV((Vector2){ux, uy}, unit_r,     Fade(col, 0.55f));
+            DrawCircleLinesV((Vector2){ux, uy}, unit_r - 3, Fade(col, 0.35f));
+            char cbuf[4];
+            snprintf(cbuf, sizeof(cbuf), "%d", s_units[i].cooldown);
+            int cfs = (int)(unit_r * 1.0f);
+            if (cfs < 7) cfs = 7;
+            int cw = MeasureText(cbuf, cfs);
+            DrawText(cbuf, (int)(ux - cw/2), (int)(uy - cfs/2), cfs, Fade(WHITE, 0.6f));
+            continue;
+        }
 
         DrawCircleV((Vector2){ux, uy}, unit_r, col);
 
@@ -420,6 +487,18 @@ static void draw_track(float cx, float cy, float r)
         if (mfs < 7) mfs = 7;
         int mw = MeasureText(mbuf, mfs);
         DrawText(mbuf, (int)(ux - mw/2), (int)(uy - mfs/2), mfs, WHITE);
+
+        /* Intent letter above player units */
+        if (team_of(i) == 0) {
+            const char *tag = intent_tag[s_actions[i].intent];
+            int tfs = (int)(unit_r * 1.2f);
+            if (tfs < 8) tfs = 8;
+            int tw = MeasureText(tag, tfs);
+            DrawText(tag,
+                     (int)(ux - tw/2),
+                     (int)(uy - unit_r - tfs - 2),
+                     tfs, GOLD);
+        }
     }
 }
 
@@ -507,22 +586,44 @@ static void draw_panel(int px, int py, int pw, int ph)
         DrawText("Intent:", px + pad, y, base_fs, LIGHTGRAY);
         y += base_fs + 2;
 
-        int ibw = (pw - pad*2) / 4;
+        /* Two-line labels: top = name, bottom = mechanic summary */
+        const char *intent_sub[] = {
+            "mv1",
+            "mv2 +str",
+            "mv0 +str",
+            "mv1 +str",
+        };
+        int ibw  = (pw - pad*2) / 4;
+        int btn_h2 = btn_h + base_fs;          /* taller to fit two lines */
+        int sub_fs = base_fs - 3;
+        if (sub_fs < 8) sub_fs = 8;
         for (int k = 0; k < 4; k++) {
-            Rectangle br = {(float)(px + pad + k*ibw), (float)y, (float)(ibw-2), (float)(btn_h)};
+            Rectangle br = {(float)(px + pad + k*ibw), (float)y,
+                            (float)(ibw-2), (float)(btn_h2)};
             bool sel_intent = (s_actions[s_selected].intent == (Intent)k);
             Color bcol = sel_intent ? GOLD : (Color){50,50,70,255};
             DrawRectangleRec(br, bcol);
-            int iw = MeasureText(intent_name[k], base_fs - 2);
+
+            int top_fs = base_fs - 2;
+            int iw     = MeasureText(intent_name[k], top_fs);
             DrawText(intent_name[k],
-                     (int)br.x + (ibw - iw)/2, (int)br.y + (btn_h - (base_fs-2))/2,
-                     base_fs - 2, WHITE);
+                     (int)br.x + (ibw - iw)/2,
+                     (int)br.y + 4,
+                     top_fs, WHITE);
+
+            int sw_    = MeasureText(intent_sub[k], sub_fs);
+            Color sub_col = sel_intent ? (Color){30,30,30,255} : LIGHTGRAY;
+            DrawText(intent_sub[k],
+                     (int)br.x + (ibw - sw_)/2,
+                     (int)br.y + 4 + top_fs + 2,
+                     sub_fs, sub_col);
+
             Vector2 mp3 = GetMousePosition();
             if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) &&
                 CheckCollisionPointRec(mp3, br))
                 s_actions[s_selected].intent = (Intent)k;
         }
-        y += btn_h + pad;
+        y += btn_h2 + pad;
     }
 
     DrawLine(px, y, px + pw, y, DARKGRAY);
@@ -571,15 +672,15 @@ static void RollerDerbyInit(void)
     s_gs       = GS_PLAYING;
     s_msg[0]   = '\0';
 
-    /* Team 0: jammer at pos 2, blockers at pos 5,6 */
-    s_units[0] = (Unit){ .pos=2,  .lane=1, .momentum=2, .active=true };
-    s_units[1] = (Unit){ .pos=5,  .lane=0, .momentum=2, .active=true };
-    s_units[2] = (Unit){ .pos=6,  .lane=2, .momentum=2, .active=true };
+    /* Pack start: both jammers together on the jammer line at pos 4,
+       all four blockers clustered at pos 6-7 in alternating lanes. */
+    s_units[0] = (Unit){ .pos=4, .lane=0, .momentum=2, .active=true };  /* T0 jammer  */
+    s_units[1] = (Unit){ .pos=6, .lane=0, .momentum=2, .active=true };  /* T0 blocker */
+    s_units[2] = (Unit){ .pos=7, .lane=2, .momentum=2, .active=true };  /* T0 blocker */
 
-    /* Team 1: jammer at pos 8, blockers at pos 11,0 */
-    s_units[3] = (Unit){ .pos=8,  .lane=1, .momentum=2, .active=true };
-    s_units[4] = (Unit){ .pos=11, .lane=0, .momentum=2, .active=true };
-    s_units[5] = (Unit){ .pos=0,  .lane=2, .momentum=2, .active=true };
+    s_units[3] = (Unit){ .pos=4, .lane=2, .momentum=2, .active=true };  /* T1 jammer  */
+    s_units[4] = (Unit){ .pos=6, .lane=2, .momentum=2, .active=true };  /* T1 blocker */
+    s_units[5] = (Unit){ .pos=7, .lane=0, .momentum=2, .active=true };  /* T1 blocker */
 }
 
 static void RollerDerbyUpdate(float dt)
