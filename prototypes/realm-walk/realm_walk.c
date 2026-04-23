@@ -119,6 +119,7 @@ static float s_turn_timer;
 static int   s_trail_col[MAX_TRAIL];
 static int   s_trail_row[MAX_TRAIL];
 static int   s_trail_len;
+static int   s_pending_moves;    /* moves taken since last cash-in */
 
 /* scan tracking */
 static bool s_col_visited[MAP_COLS];
@@ -254,6 +255,22 @@ static Rectangle hud_body_rect(void)
     int body_h = sh * 22 / 100;
     float y = (float)tab_h + (s_hud_t - 1.0f) * (float)body_h;
     return (Rectangle){ 0, y, (float)sw, (float)body_h };
+}
+
+/* Cash In button: lower-right corner, just above the legend tab */
+static Rectangle cashin_btn_rect(void)
+{
+    int sw     = GetScreenWidth();
+    int sh     = GetScreenHeight();
+    int bh     = sh * 8 / 100;
+    int bw     = sw * 22 / 100;
+    int leg_h  = sh * 7 / 100;
+    int margin = sh * 2 / 100;
+    return (Rectangle){
+        (float)(sw - bw - margin),
+        (float)(sh - leg_h - bh - margin),
+        (float)bw, (float)bh
+    };
 }
 
 /* Legend tab: fixed strip at the very bottom of the screen */
@@ -747,14 +764,127 @@ static void award_turn_score(void)
     if (s_turn_count >= TURNS_LIMIT) s_game_over = true;
 }
 
+/* Flood-fill cash-in: find connected groups of 9+ same-terrain tiles whose
+ * bounding box is square (width == height), replace them with random terrain. */
+static void cashin_resolve(void)
+{
+    static bool visited[MAP_ROWS][MAP_COLS];
+    static int  q_col[MAP_ROWS * MAP_COLS];
+    static int  q_row[MAP_ROWS * MAP_COLS];
+    static int  grp_col[MAP_ROWS * MAP_COLS];
+    static int  grp_row[MAP_ROWS * MAP_COLS];
+    static int  match_col[MAP_ROWS * MAP_COLS];
+    static int  match_row[MAP_ROWS * MAP_COLS];
+
+    memset(visited, 0, sizeof(visited));
+    int match_count = 0;
+
+    static const int dc4[4] = { 0,  0,  1, -1 };
+    static const int dr4[4] = { 1, -1,  0,  0 };
+
+    for (int sr = 0; sr < MAP_ROWS; sr++) {
+        for (int sc = 0; sc < MAP_COLS; sc++) {
+            if (visited[sr][sc]) continue;
+
+            Terrain t = s_map[sr][sc];
+            int grp_size = 0;
+            int min_c = sc, max_c = sc, min_r = sr, max_r = sr;
+
+            int head = 0, tail = 0;
+            q_col[tail] = sc; q_row[tail] = sr; tail++;
+            visited[sr][sc] = true;
+
+            while (head < tail) {
+                int c = q_col[head], r = q_row[head]; head++;
+                grp_col[grp_size] = c;
+                grp_row[grp_size] = r;
+                grp_size++;
+                if (c < min_c) min_c = c;
+                if (c > max_c) max_c = c;
+                if (r < min_r) min_r = r;
+                if (r > max_r) max_r = r;
+
+                for (int d = 0; d < 4; d++) {
+                    int nc = c + dc4[d], nr = r + dr4[d];
+                    if (nc < 0 || nc >= MAP_COLS || nr < 0 || nr >= MAP_ROWS) continue;
+                    if (visited[nr][nc]) continue;
+                    if (s_map[nr][nc] != t) continue;
+                    visited[nr][nc] = true;
+                    q_col[tail] = nc; q_row[tail] = nr; tail++;
+                }
+            }
+
+            int bbox_w = max_c - min_c + 1;
+            int bbox_h = max_r - min_r + 1;
+            if (grp_size >= 9 && bbox_w == bbox_h) {
+                for (int i = 0; i < grp_size; i++) {
+                    match_col[match_count] = grp_col[i];
+                    match_row[match_count] = grp_row[i];
+                    match_count++;
+                }
+            }
+        }
+    }
+
+    s_pending_moves = 0;
+
+    if (match_count == 0) return;
+
+    /* Remove structures that overlap any matched cell */
+    static bool struct_remove[MAX_STRUCTURES];
+    memset(struct_remove, 0, sizeof(struct_remove));
+    for (int i = 0; i < match_count; i++) {
+        int si = s_cell_struct[match_row[i]][match_col[i]];
+        if (si >= 0) struct_remove[si] = true;
+    }
+    /* Clear s_cell_struct footprint for removed structures */
+    for (int i = 0; i < s_structure_count; i++) {
+        if (!struct_remove[i]) continue;
+        Structure *s = &s_structures[i];
+        for (int ci = 0; ci < s->cell_count; ci++)
+            s_cell_struct[s->row + s->cell_dr[ci]][s->col + s->cell_dc[ci]] = -1;
+    }
+    /* Compact s_structures[], re-index s_cell_struct */
+    int new_count = 0;
+    for (int i = 0; i < s_structure_count; i++) {
+        if (struct_remove[i]) continue;
+        if (new_count != i) {
+            s_structures[new_count] = s_structures[i];
+            Structure *s = &s_structures[new_count];
+            for (int ci = 0; ci < s->cell_count; ci++)
+                s_cell_struct[s->row + s->cell_dr[ci]][s->col + s->cell_dc[ci]] = new_count;
+        }
+        new_count++;
+    }
+    s_structure_count = new_count;
+
+    /* Replace terrain and record flash positions */
+    s_flash_count = 0;
+    for (int i = 0; i < match_count; i++) {
+        int c = match_col[i], r = match_row[i];
+        s_map[r][c] = (Terrain)GetRandomValue(0, TERRAIN_COUNT - 1);
+        if (s_flash_count < MAX_FLASH_CELLS) {
+            s_flash_col[s_flash_count] = c;
+            s_flash_row[s_flash_count] = r;
+            s_flash_count++;
+        }
+    }
+
+    /* Award score and trigger flash */
+    int pts = match_count * 10;
+    spawn_popup((float)(MAP_COLS / 2), (float)(MAP_ROWS / 2 - 1), pts);
+    s_score += pts;
+    s_phase      = PHASE_SCANNING;
+    s_scan_flash = SCAN_FLASH_SECS;
+}
+
 static void end_turn(void)
 {
-    s_is_dragging = false;
-    s_flash_count = 0;
-    scan_matches();
+    s_is_dragging   = false;
+    s_flash_count   = 0;
+    s_pending_moves++;
     award_turn_score();
-    s_phase      = PHASE_SCANNING;
-    s_scan_flash = (s_flash_count > 0) ? SCAN_FLASH_SECS : 0.0f;
+    s_phase      = PHASE_IDLE;
     s_turn_timer = TURN_SECS;
 }
 
@@ -851,6 +981,12 @@ static void on_up(Vector2 pos)
     /* legend tab toggle */
     if (CheckCollisionPointRec(pos, legend_tab_rect())) {
         s_legend_open = !s_legend_open;
+        return;
+    }
+
+    /* cash-in button */
+    if (s_phase == PHASE_IDLE && CheckCollisionPointRec(pos, cashin_btn_rect())) {
+        cashin_resolve();
     }
 }
 
@@ -871,59 +1007,15 @@ static const Terrain STRUCT_TERRAIN[STRUCT_TYPE_COUNT] = {
 
 /* --------------------------------------------------------------- rendering */
 
-/* Draw a terrain-specific icon centered at (cx, cy), scaled by s (= tw/3). */
+/* Draw a terrain letter centered at (cx, cy), scaled by s (= tw/3). */
 static void draw_terrain_icon(int cx, int cy, int s, Terrain t, Color c)
 {
-    switch (t) {
-    case TERRAIN_PLAINS:
-        /* circle dot */
-        DrawCircle(cx, cy, s * 42 / 100, c);
-        break;
-    case TERRAIN_FOREST:
-        /* tree: upward triangle canopy + small trunk */
-        DrawTriangle(
-            (Vector2){ (float)cx,           (float)(cy - s * 58 / 100) },
-            (Vector2){ (float)(cx + s),     (float)(cy + s * 42 / 100) },
-            (Vector2){ (float)(cx - s),     (float)(cy + s * 42 / 100) }, c);
-        DrawRectangle(cx - s * 14 / 100, cy + s * 42 / 100,
-                      s * 28 / 100, s * 22 / 100, c);
-        break;
-    case TERRAIN_MOUNTAIN:
-        /* main peak */
-        DrawTriangle(
-            (Vector2){ (float)cx,             (float)(cy - s * 68 / 100) },
-            (Vector2){ (float)(cx + s),       (float)(cy + s * 32 / 100) },
-            (Vector2){ (float)(cx - s),       (float)(cy + s * 32 / 100) }, c);
-        /* second smaller peak behind-left */
-        DrawTriangle(
-            (Vector2){ (float)(cx - s * 42 / 100), (float)(cy - s * 28 / 100) },
-            (Vector2){ (float)(cx + s * 10 / 100), (float)(cy + s * 32 / 100) },
-            (Vector2){ (float)(cx - s * 115 / 100),(float)(cy + s * 32 / 100) },
-            (Color){ c.r, c.g, c.b, 150 });
-        break;
-    case TERRAIN_CITY:
-        /* building: wide base + narrow tower */
-        DrawRectangle(cx - s * 46 / 100, cy - s * 15 / 100,
-                      s * 92 / 100, s * 50 / 100, c);
-        DrawRectangle(cx - s * 16 / 100, cy - s * 58 / 100,
-                      s * 32 / 100, s * 43 / 100, c);
-        /* window cutout */
-        DrawRectangle(cx - s * 10 / 100, cy - s *  8 / 100,
-                      s * 20 / 100, s * 28 / 100, (Color){ 0, 0, 0, 200 });
-        break;
-    case TERRAIN_WATER:
-        /* two staggered wave bars */
-        {
-            int wh = s * 18 / 100; if (wh < 2) wh = 2;
-            int ww = s * 56 / 100; if (ww < 3) ww = 3;
-            DrawRectangle(cx - ww - ww / 4, cy - wh * 2, ww, wh, c);
-            DrawRectangle(cx + ww / 4,      cy - wh * 2, ww, wh, (Color){ c.r, c.g, c.b, 180 });
-            DrawRectangle(cx - ww,          cy,           ww, wh, c);
-            DrawRectangle(cx,               cy,           ww, wh, (Color){ c.r, c.g, c.b, 180 });
-        }
-        break;
-    default: break;
-    }
+    if (t < 0 || t >= TERRAIN_COUNT) return;
+    char letter[2] = { TERRAIN_LETTER[t], '\0' };
+    int fs = s * 2;
+    if (fs < 8) fs = 8;
+    int lw = MeasureText(letter, fs);
+    DrawText(letter, cx - lw / 2, cy - fs / 2, fs, c);
 }
 
 static void draw_map_tiles(void)
@@ -1533,9 +1625,10 @@ static void RealmWalkInit(void)
     memset(s_trail_age, 0, sizeof(s_trail_age));
 
     /* scoring state */
-    s_score      = 0;
-    s_turn_count = 0;
-    s_game_over  = false;
+    s_score         = 0;
+    s_turn_count    = 0;
+    s_pending_moves = 0;
+    s_game_over     = false;
     for (int _pi = 0; _pi < MAX_SCORE_POPUPS; _pi++)
         s_popups[_pi].active = false;
 
@@ -1659,6 +1752,29 @@ static void RealmWalkUpdate(float dt)
     }
 }
 
+static void draw_cashin_btn(void)
+{
+    Rectangle r    = cashin_btn_rect();
+    bool active    = (s_pending_moves > 0) && (s_phase == PHASE_IDLE);
+    Color bg       = active ? (Color){ 220, 170, 40, 230 } : (Color){ 80, 80, 80, 180 };
+    Color border   = active ? (Color){ 255, 220, 80, 255 } : (Color){ 120, 120, 120, 200 };
+    Color text_col = active ? (Color){ 0, 0, 0, 255 }     : (Color){ 160, 160, 160, 200 };
+
+    DrawRectangleRounded(r, 0.25f, 6, bg);
+    DrawRectangleLinesEx(r, 2.0f, border);
+
+    char label[32];
+    snprintf(label, sizeof(label), "Cash In (%d)", s_pending_moves);
+    int sh = GetScreenHeight();
+    int fs = sh * 4 / 100;
+    if (fs < 10) fs = 10;
+    int lw = MeasureText(label, fs);
+    DrawText(label,
+             (int)(r.x + (r.width  - lw) / 2),
+             (int)(r.y + (r.height - fs) / 2),
+             fs, text_col);
+}
+
 static void draw_score_popups(void)
 {
     int ts = tile_px();
@@ -1731,6 +1847,7 @@ static void RealmWalkDraw(void)
     draw_score_popups();
     draw_resource_strip();
     draw_timer_bar();
+    draw_cashin_btn();
     draw_legend();
     draw_end_game();
 }
