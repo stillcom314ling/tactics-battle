@@ -1027,20 +1027,16 @@ static void draw_map_tiles(void)
             if (col == s_hero_col && row == s_hero_row) continue;
             if (s_cell_struct[row][col] >= 0) continue;
             if (s_cell_flying_dst[row][col]) continue;   /* animated tile en-route */
-            /* 4px OLED-black gap; tile = outline border + terrain icon, no fill */
             int   inset = ts / 10; if (inset < 2) inset = 2;
             int   sx = (int)((col - s_vp_vis_col) * ts) + inset;
             int   sy = (int)((row - s_vp_vis_row) * ts) + inset;
             int   tw = ts - inset * 2;
             Color c  = TERRAIN_COLOR[s_map[row][col]];
-            float bw = (float)(tw * 8 / 100); if (bw < 2.0f) bw = 2.0f;
-            DrawRectangleLinesEx(
-                (Rectangle){ (float)sx, (float)sy, (float)tw, (float)tw },
-                bw, c);
+            DrawRectangle(sx, sy, tw, tw, c);
             int icx = sx + tw / 2;
             int icy = sy + tw / 2;
             int s   = tw / 3;
-            draw_terrain_icon(icx, icy, s, s_map[row][col], c);
+            draw_terrain_icon(icx, icy, s, s_map[row][col], (Color){ 0, 0, 0, 160 });
         }
     }
 
