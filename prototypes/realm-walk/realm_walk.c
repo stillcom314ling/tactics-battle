@@ -788,7 +788,6 @@ static void cashin_resolve(void)
 
             Terrain t = s_map[sr][sc];
             int grp_size = 0;
-            int min_c = sc, max_c = sc, min_r = sr, max_r = sr;
 
             int head = 0, tail = 0;
             q_col[tail] = sc; q_row[tail] = sr; tail++;
@@ -799,10 +798,6 @@ static void cashin_resolve(void)
                 grp_col[grp_size] = c;
                 grp_row[grp_size] = r;
                 grp_size++;
-                if (c < min_c) min_c = c;
-                if (c > max_c) max_c = c;
-                if (r < min_r) min_r = r;
-                if (r > max_r) max_r = r;
 
                 for (int d = 0; d < 4; d++) {
                     int nc = c + dc4[d], nr = r + dr4[d];
@@ -814,9 +809,7 @@ static void cashin_resolve(void)
                 }
             }
 
-            int bbox_w = max_c - min_c + 1;
-            int bbox_h = max_r - min_r + 1;
-            if (grp_size >= 9 && bbox_w == bbox_h) {
+            if (grp_size >= 5) {
                 for (int i = 0; i < grp_size; i++) {
                     match_col[match_count] = grp_col[i];
                     match_row[match_count] = grp_row[i];
