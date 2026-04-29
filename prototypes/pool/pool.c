@@ -19,9 +19,9 @@
 #define BALL_RESTITUTION   0.96f
 
 #define MAX_SHOT_SPEED        1800.0f
-#define FULL_POWER_DRAG_FRAC  0.5f   /* drag this fraction of the long side for max power */
+#define FULL_POWER_DRAG_FRAC  0.25f  /* drag this fraction of the long side for max power */
 #define DEAD_ZONE             18.0f  /* drag below this cancels the shot */
-#define PREDICT_LEN_FRAC      0.18f  /* object-ball prediction line as fraction of long side */
+#define MAX_CHAIN_DEPTH       8      /* recursion cap for aim-assist chain */
 
 typedef struct {
     Vector2 pos, vel;
@@ -507,6 +507,43 @@ static void PoolUpdate(float dt)
     }
 }
 
+/* Recursively trace a moving ball's straight-line trajectory until it hits
+ * another ball or a cushion. Each hit spawns the next chain link using the
+ * line-of-centres rule. `skip_idx` excludes the moving ball from collision. */
+static void trace_chain(Vector2 origin, Vector2 dir, int skip_idx, int depth)
+{
+    if (depth >= MAX_CHAIN_DEPTH) return;
+    float r = s_table.ball_r;
+
+    int   hit = -1;
+    float t_first = 1e9f;
+    for (int i = 0; i < MAX_BALLS; i++) {
+        if (i == skip_idx || !s_balls[i].active) continue;
+        float t = ray_circle_t(origin, dir, s_balls[i].pos, 2.0f * r);
+        if (t > 0 && t < t_first) { t_first = t; hit = i; }
+    }
+    float t_cushion = ray_cushion_t(origin, dir, r);
+    float t_end = (hit >= 0 && t_first < t_cushion) ? t_first : t_cushion;
+    Vector2 end_pt = v_add(origin, v_scale(dir, t_end));
+
+    unsigned char alpha = (unsigned char)(180 - depth * 20);
+    if (alpha < 80) alpha = 80;
+    Color seg_col   = (Color){ 255, 255, 255, alpha };
+    Color ghost_col = (Color){ 255, 255, 255, (unsigned char)(alpha * 3 / 4) };
+
+    DrawLineEx(origin, end_pt, 2.0f, seg_col);
+
+    if (hit >= 0 && t_first < t_cushion) {
+        DrawCircleLinesV(end_pt, r, ghost_col);
+        Vector2 ob_dir = v_sub(s_balls[hit].pos, end_pt);
+        float ob_len = v_len(ob_dir);
+        if (ob_len > 0.0001f) {
+            ob_dir = v_scale(ob_dir, 1.0f / ob_len);
+            trace_chain(s_balls[hit].pos, ob_dir, hit, depth + 1);
+        }
+    }
+}
+
 static void draw_trajectory(Ball *cue)
 {
     Vector2 drag = v_sub(s_aim_pos, s_aim_press);
@@ -552,29 +589,17 @@ static void draw_trajectory(Ball *cue)
 
     /* ghost ball at the impact point */
     if (first_hit_idx >= 0 && t_cue_first < t_cushion) {
-        DrawCircleLinesV(cue_end, r, (Color){ 255, 255, 255, 160 });
-    }
+        DrawCircleLinesV(cue_end, r, (Color){ 255, 255, 255, 200 });
 
-    /* aim assist: predict where every ball in the cue's straight path would
-     * go if it were the first ball hit (line of centres at impact). */
-    if (s_aim_assist) {
-        float predict_len = ((s_table.outer.width > s_table.outer.height)
-                             ? s_table.outer.width : s_table.outer.height)
-                            * PREDICT_LEN_FRAC;
-        Color predict_col = (Color){ 255, 255, 255, 150 };
-
-        for (int i = 0; i < MAX_BALLS; i++) {
-            if (i == s_cue_idx || !s_balls[i].active) continue;
-            float t = ray_circle_t(cue->pos, shot_dir, s_balls[i].pos, 2.0f * r);
-            if (t <= 0) continue;
-            Vector2 cue_at_impact = v_add(cue->pos, v_scale(shot_dir, t));
-            Vector2 ob_dir = v_sub(s_balls[i].pos, cue_at_impact);
+        /* aim assist: simulate the chain — first ball's line of centres,
+         * then recursively whatever that ball would hit, and so on. */
+        if (s_aim_assist) {
+            Vector2 ob_dir = v_sub(s_balls[first_hit_idx].pos, cue_end);
             float ob_len = v_len(ob_dir);
-            if (ob_len < 0.0001f) continue;
-            ob_dir = v_scale(ob_dir, 1.0f / ob_len);
-            Vector2 ob_end = v_add(s_balls[i].pos, v_scale(ob_dir, predict_len));
-            DrawLineEx(s_balls[i].pos, ob_end, 2.0f, predict_col);
-            DrawCircleLinesV(ob_end, 3.0f, predict_col);
+            if (ob_len > 0.0001f) {
+                ob_dir = v_scale(ob_dir, 1.0f / ob_len);
+                trace_chain(s_balls[first_hit_idx].pos, ob_dir, first_hit_idx, 0);
+            }
         }
     }
 
