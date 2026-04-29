@@ -14,10 +14,12 @@
 #define CUSHION_FRAC     0.045f
 #define TABLE_PAD_FRAC   0.04f    /* outer margin around the cushions */
 
-#define FRICTION_DECEL   240.0f   /* px/s² rolling deceleration */
-#define MIN_SPEED          6.0f
-#define WALL_RESTITUTION   0.92f
-#define BALL_RESTITUTION   0.96f
+#define FRICTION_DECEL        520.0f   /* px/s² rolling deceleration */
+#define MIN_SPEED               3.0f
+#define WALL_RESTITUTION        0.68f
+#define BALL_RESTITUTION        0.94f
+#define BALL_FRICTION_MU        0.05f   /* tangential energy bleed per ball-ball impact */
+#define CUSHION_TANGENT_KEEP    0.90f   /* fraction of parallel velocity kept at a cushion */
 
 #define MAX_SHOT_SPEED        1800.0f
 #define FULL_POWER_DRAG_FRAC  0.25f  /* drag this fraction of the long side for max power */
@@ -295,6 +297,16 @@ static void resolve_ball_pair(Ball *a, Ball *b, float r)
     Vector2 imp = v_scale(n, j);
     a->vel = v_sub(a->vel, imp);
     b->vel = v_add(b->vel, imp);
+
+    /* tangential friction: bleeds a small fraction of the relative tangent
+     * velocity. Adds weight to glancing/cut shots — without this, the cue
+     * ball loses no speed on a thin hit. */
+    Vector2 tng  = { -n.y, n.x };
+    float   rv_t = rv.x * tng.x + rv.y * tng.y;
+    float   jt   = -BALL_FRICTION_MU * rv_t * 0.5f;
+    Vector2 imp_t = v_scale(tng, jt);
+    a->vel = v_sub(a->vel, imp_t);
+    b->vel = v_add(b->vel, imp_t);
 }
 
 static void resolve_cushion(Ball *bl, float r)
@@ -304,10 +316,10 @@ static void resolve_cushion(Ball *bl, float r)
     float top    = s_table.felt.y + r;
     float bottom = s_table.felt.y + s_table.felt.height - r;
 
-    if (bl->pos.x < left)   { bl->pos.x = left;   bl->vel.x =  fabsf(bl->vel.x) * WALL_RESTITUTION; }
-    if (bl->pos.x > right)  { bl->pos.x = right;  bl->vel.x = -fabsf(bl->vel.x) * WALL_RESTITUTION; }
-    if (bl->pos.y < top)    { bl->pos.y = top;    bl->vel.y =  fabsf(bl->vel.y) * WALL_RESTITUTION; }
-    if (bl->pos.y > bottom) { bl->pos.y = bottom; bl->vel.y = -fabsf(bl->vel.y) * WALL_RESTITUTION; }
+    if (bl->pos.x < left)   { bl->pos.x = left;   bl->vel.x =  fabsf(bl->vel.x) * WALL_RESTITUTION; bl->vel.y *= CUSHION_TANGENT_KEEP; }
+    if (bl->pos.x > right)  { bl->pos.x = right;  bl->vel.x = -fabsf(bl->vel.x) * WALL_RESTITUTION; bl->vel.y *= CUSHION_TANGENT_KEEP; }
+    if (bl->pos.y < top)    { bl->pos.y = top;    bl->vel.y =  fabsf(bl->vel.y) * WALL_RESTITUTION; bl->vel.x *= CUSHION_TANGENT_KEEP; }
+    if (bl->pos.y > bottom) { bl->pos.y = bottom; bl->vel.y = -fabsf(bl->vel.y) * WALL_RESTITUTION; bl->vel.x *= CUSHION_TANGENT_KEEP; }
 }
 
 static void check_pockets(void)
@@ -370,19 +382,19 @@ static void integrate(float dt)
             if (!s_balls[i].active) continue;
             resolve_cushion(&s_balls[i], r);
         }
-    }
-
-    /* friction + stop threshold (applied once per frame, not per substep) */
-    for (int i = 0; i < MAX_BALLS; i++) {
-        if (!s_balls[i].active) continue;
-        float speed = v_len(s_balls[i].vel);
-        if (speed <= MIN_SPEED) {
-            s_balls[i].vel = (Vector2){ 0, 0 };
-            continue;
+        /* friction + stop threshold per substep so the apparent deceleration
+         * is framerate-independent and balls don't snap-stop at frame edges. */
+        for (int i = 0; i < MAX_BALLS; i++) {
+            if (!s_balls[i].active) continue;
+            float speed = v_len(s_balls[i].vel);
+            if (speed <= MIN_SPEED) {
+                s_balls[i].vel = (Vector2){ 0, 0 };
+                continue;
+            }
+            float new_speed = speed - FRICTION_DECEL * sdt;
+            if (new_speed < 0) new_speed = 0;
+            s_balls[i].vel = v_scale(s_balls[i].vel, new_speed / speed);
         }
-        float new_speed = speed - FRICTION_DECEL * dt;
-        if (new_speed < 0) new_speed = 0;
-        s_balls[i].vel = v_scale(s_balls[i].vel, new_speed / speed);
     }
 }
 
