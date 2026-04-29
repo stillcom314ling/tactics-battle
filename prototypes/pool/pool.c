@@ -18,10 +18,10 @@
 #define WALL_RESTITUTION   0.92f
 #define BALL_RESTITUTION   0.96f
 
-#define MAX_SHOT_SPEED   1800.0f
-#define POWER_GAIN          3.5f  /* drag-pixel → velocity-px/s */
-#define DEAD_ZONE          18.0f  /* drag below this cancels the shot */
-#define PREDICT_LEN_FRAC   0.18f  /* object-ball prediction line as fraction of long side */
+#define MAX_SHOT_SPEED        1800.0f
+#define FULL_POWER_DRAG_FRAC  0.5f   /* drag this fraction of the long side for max power */
+#define DEAD_ZONE             18.0f  /* drag below this cancels the shot */
+#define PREDICT_LEN_FRAC      0.18f  /* object-ball prediction line as fraction of long side */
 
 typedef struct {
     Vector2 pos, vel;
@@ -71,6 +71,16 @@ static float clampf(float v, float lo, float hi)
     if (v < lo) return lo;
     if (v > hi) return hi;
     return v;
+}
+
+/* Per-pixel velocity gain so that a drag of FULL_POWER_DRAG_FRAC * long_side
+ * maps to MAX_SHOT_SPEED. Recomputed each call so it tracks window size. */
+static float power_gain(void)
+{
+    float long_side = (s_table.outer.width > s_table.outer.height)
+                      ? s_table.outer.width : s_table.outer.height;
+    if (long_side < 1.0f) return 0.0f;
+    return MAX_SHOT_SPEED / (long_side * FULL_POWER_DRAG_FRAC);
 }
 
 static void compute_table(Table *t)
@@ -447,7 +457,7 @@ static void handle_input(void)
             float dist = v_len(drag);
             if (dist > DEAD_ZONE) {
                 Vector2 shot_dir = v_scale(drag, -1.0f / dist);
-                float speed = clampf(dist * POWER_GAIN, 0, MAX_SHOT_SPEED);
+                float speed = clampf(dist * power_gain(), 0, MAX_SHOT_SPEED);
                 cue->vel = v_scale(shot_dir, speed);
             }
         }
@@ -531,7 +541,7 @@ static void draw_trajectory(Ball *cue)
                   ? t_cue_first : t_cushion;
     Vector2 cue_end = v_add(cue->pos, v_scale(shot_dir, t_end));
 
-    float power_t = clampf((dist * POWER_GAIN) / MAX_SHOT_SPEED, 0.0f, 1.0f);
+    float power_t = clampf((dist * power_gain()) / MAX_SHOT_SPEED, 0.0f, 1.0f);
     Color line_col = (Color){
         (unsigned char)(255 * power_t + 200 * (1 - power_t)),
         (unsigned char)(80  * (1 - power_t) + 80 * power_t),
