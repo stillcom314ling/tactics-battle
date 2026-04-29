@@ -10,6 +10,7 @@
 
 #define BALL_R_FRAC      0.018f   /* fraction of long table side */
 #define POCKET_R_FRAC    0.032f
+#define POCKET_COLLIDER_MULT 1.2f /* sink radius is 20% larger than visual */
 #define CUSHION_FRAC     0.045f
 #define TABLE_PAD_FRAC   0.04f    /* outer margin around the cushions */
 
@@ -311,7 +312,7 @@ static void resolve_cushion(Ball *bl, float r)
 
 static void check_pockets(void)
 {
-    float pr = s_table.pocket_r;
+    float pr = s_table.pocket_r * POCKET_COLLIDER_MULT;
     for (int i = 0; i < MAX_BALLS; i++) {
         if (!s_balls[i].active) continue;
         for (int p = 0; p < POCKET_COUNT; p++) {
@@ -362,11 +363,13 @@ static void integrate(float dt)
                 resolve_ball_pair(&s_balls[i], &s_balls[j], r);
             }
         }
+        /* pockets first: a ball that has crossed the felt edge into a pocket
+         * mouth must be sunk before the cushion clamp deflects it back. */
+        check_pockets();
         for (int i = 0; i < MAX_BALLS; i++) {
             if (!s_balls[i].active) continue;
             resolve_cushion(&s_balls[i], r);
         }
-        check_pockets();
     }
 
     /* friction + stop threshold (applied once per frame, not per substep) */
