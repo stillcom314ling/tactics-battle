@@ -11,6 +11,7 @@
 #define BALL_R_FRAC      0.018f   /* fraction of long table side */
 #define POCKET_R_FRAC    0.032f
 #define POCKET_COLLIDER_MULT 1.2f /* sink radius is 20% larger than visual */
+#define POCKET_SWALLOW_MULT  1.4f /* cushion clamp disabled within this radius of a pocket */
 #define CUSHION_FRAC     0.045f
 #define TABLE_PAD_FRAC   0.04f    /* outer margin around the cushions */
 
@@ -311,6 +312,15 @@ static void resolve_ball_pair(Ball *a, Ball *b, float r)
 
 static void resolve_cushion(Ball *bl, float r)
 {
+    /* pocket-mouth carveout: while the ball's centre is inside a pocket's
+     * swallow zone, suppress cushion clamping so it can travel freely into
+     * the sink radius instead of bouncing off the rail at the pocket lip. */
+    float swallow = s_table.pocket_r * POCKET_SWALLOW_MULT;
+    for (int p = 0; p < POCKET_COUNT; p++) {
+        Vector2 dp = v_sub(bl->pos, s_table.pocket[p]);
+        if (v_len(dp) < swallow) return;
+    }
+
     float left   = s_table.felt.x + r;
     float right  = s_table.felt.x + s_table.felt.width  - r;
     float top    = s_table.felt.y + r;
