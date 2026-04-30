@@ -27,14 +27,17 @@
 #define DEAD_ZONE             18.0f  /* drag below this cancels the shot */
 #define MAX_CHAIN_DEPTH       8      /* recursion cap for aim-assist chain */
 
-/* spin / English */
-#define SPIN_FOLLOW_GAIN      0.55f  /* follow/draw added to cue post-impact */
-#define SPIN_ENGLISH_TANGENT  0.20f  /* additive boost to CUSHION_TANGENT_KEEP */
-#define SPIN_ENGLISH_ANGLE    0.18f  /* tangent kick on cushion, scaled by |normal_speed| */
-#define SPIN_DECAY_PER_SEC    0.55f  /* exponential bleed of stored spin */
-#define SPIN_POWER_PENALTY    0.35f  /* off-center hits scale shot speed */
+/* spin / English — gains are tuned for an arcade feel: full follow keeps
+ * the cue rolling forward through the impact at near-shot speed, full draw
+ * snaps it back hard, full side English makes cushion bounces visibly skew. */
+#define SPIN_FOLLOW_GAIN      0.95f  /* follow/draw added to cue post-impact */
+#define SPIN_ENGLISH_TANGENT  0.35f  /* additive boost to CUSHION_TANGENT_KEEP */
+#define SPIN_ENGLISH_ANGLE    0.32f  /* tangent kick on cushion, scaled by |normal_speed| */
+#define SPIN_ENGLISH_KEEP_MAX 1.25f  /* hard cap on tangent-keep so multi-rail running English can't run away */
+#define SPIN_DECAY_PER_SEC    0.45f  /* exponential bleed of stored spin */
+#define SPIN_POWER_PENALTY    0.30f  /* off-center hits scale shot speed */
 #define MISCUE_THRESHOLD      0.85f  /* picker offset above this flags red */
-#define AIM_FOLLOW_PREVIEW    0.55f  /* matches SPIN_FOLLOW_GAIN for honest preview */
+#define AIM_FOLLOW_PREVIEW    0.95f  /* matches SPIN_FOLLOW_GAIN for honest preview */
 #define PICKER_R_FRAC         0.05f  /* picker radius / long_side; clamped 60..110 px */
 #define PICKER_R_MIN          60.0f
 #define PICKER_R_MAX          110.0f
@@ -351,8 +354,11 @@ static void resolve_ball_pair(Ball *a, Ball *b, float r)
     else if (b->is_cue) { cue_b = b; fwd = (Vector2){ -n.x, -n.y }; }
     if (cue_b && (cue_b->spin.x != 0.0f || cue_b->spin.y != 0.0f)) {
         float spin_fwd = cue_b->spin.x * fwd.x + cue_b->spin.y * fwd.y;
-        float pre_speed = sqrtf(rv.x*rv.x + rv.y*rv.y);
-        Vector2 follow_vel = v_scale(fwd, spin_fwd * SPIN_FOLLOW_GAIN * pre_speed);
+        /* scale by closing speed along the line of centres — so a head-on
+         * follow shot launches the cue forward at ~SPIN_FOLLOW_GAIN times
+         * the closing speed, while a thin cut barely amplifies. */
+        float closing = fabsf(rv_n);
+        Vector2 follow_vel = v_scale(fwd, spin_fwd * SPIN_FOLLOW_GAIN * closing);
         cue_b->vel = v_add(cue_b->vel, follow_vel);
 
         cue_b->spin.x -= fwd.x * spin_fwd * 0.7f;
@@ -406,8 +412,8 @@ static void resolve_cushion(Ball *bl, float r)
     float spin_t = bl->spin.x * t_axis.x + bl->spin.y * t_axis.y;
 
     float keep = CUSHION_TANGENT_KEEP + SPIN_ENGLISH_TANGENT * spin_t;
-    if (keep < 0.5f)  keep = 0.5f;
-    if (keep > 1.15f) keep = 1.15f;
+    if (keep < 0.4f)               keep = 0.4f;
+    if (keep > SPIN_ENGLISH_KEEP_MAX) keep = SPIN_ENGLISH_KEEP_MAX;
 
     /* damp the parallel component (axis-aligned t_axis: only x or y) */
     if (hit_axis == 1) bl->vel.y *= keep; else bl->vel.x *= keep;
@@ -606,9 +612,14 @@ static void handle_input(void)
         }
     } else if (s_prev_pressed && !pressed) {
         if (s_dragging_spin) {
-            /* tap (no significant drag) inside the picker resets to centre */
-            float drag = v_len(v_sub(ptr, s_picker_press));
-            if (drag < s_picker_r * PICKER_RESET_TAP_FRAC) {
+            /* tapping the picker's CENTRE (not just any short tap) resets to
+             * zero. We require both press and release to land near the centre
+             * — otherwise tap-to-set-spin (the natural touch interaction)
+             * would wipe the spin the user just chose. */
+            float press_to_c   = v_len(v_sub(s_picker_press, s_picker_center));
+            float release_to_c = v_len(v_sub(ptr,             s_picker_center));
+            float reset_r      = s_picker_r * PICKER_RESET_TAP_FRAC;
+            if (press_to_c < reset_r && release_to_c < reset_r) {
                 s_spin_pick = (Vector2){ 0, 0 };
             }
             s_dragging_spin = false;
