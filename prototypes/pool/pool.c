@@ -27,8 +27,23 @@
 #define DEAD_ZONE             18.0f  /* drag below this cancels the shot */
 #define MAX_CHAIN_DEPTH       8      /* recursion cap for aim-assist chain */
 
+/* spin / English */
+#define SPIN_FOLLOW_GAIN      0.55f  /* follow/draw added to cue post-impact */
+#define SPIN_ENGLISH_TANGENT  0.20f  /* additive boost to CUSHION_TANGENT_KEEP */
+#define SPIN_ENGLISH_ANGLE    0.18f  /* tangent kick on cushion, scaled by |normal_speed| */
+#define SPIN_DECAY_PER_SEC    0.55f  /* exponential bleed of stored spin */
+#define SPIN_POWER_PENALTY    0.35f  /* off-center hits scale shot speed */
+#define MISCUE_THRESHOLD      0.85f  /* picker offset above this flags red */
+#define AIM_FOLLOW_PREVIEW    0.55f  /* matches SPIN_FOLLOW_GAIN for honest preview */
+#define PICKER_R_FRAC         0.05f  /* picker radius / long_side; clamped 60..110 px */
+#define PICKER_R_MIN          60.0f
+#define PICKER_R_MAX          110.0f
+#define PICKER_MARGIN_FRAC    0.02f  /* picker padding from screen edge */
+#define PICKER_RESET_TAP_FRAC 0.18f  /* tap (no drag) within this fraction of picker_r resets */
+
 typedef struct {
     Vector2 pos, vel;
+    Vector2 spin;       /* world-frame: x = side English, y = top/bottom; |spin| ≤ 1 */
     Color   color;
     bool    active;
     bool    is_cue;
@@ -55,6 +70,16 @@ static Vector2 s_aim_pos;       /* current pointer location while aiming */
 /* aim-assist toggle: predict trajectories of every object ball in the cue path */
 static bool      s_aim_assist;
 static Rectangle s_toggle_btn;
+
+/* hit-point picker (bottom-right): a circle representing the cue ball with a
+ * draggable dot. The dot's offset from centre, normalized to the picker radius,
+ * is the spin vector applied at the next shot. */
+static Vector2   s_spin_pick;        /* unit-disk: x = side, y = top/bottom (screen-space here, rotated into shot frame on release) */
+static Vector2   s_picker_center;
+static float     s_picker_r;
+static Rectangle s_picker_box;       /* hit rect, slightly inflated for touch */
+static bool      s_dragging_spin;
+static Vector2   s_picker_press;     /* press point inside the picker — for tap-to-reset */
 
 /* input edge detection (mouse + touch unified) */
 static bool    s_prev_pressed;
@@ -238,6 +263,7 @@ static void rack_balls(void)
             s_balls[idx] = (Ball){
                 .pos    = p,
                 .vel    = { 0, 0 },
+                .spin   = { 0, 0 },
                 .color  = object_ball_color(rack_n),
                 .active = true,
                 .is_cue = false,
@@ -252,10 +278,14 @@ static void rack_balls(void)
     s_balls[0] = (Ball){
         .pos    = random_kitchen_pos(),
         .vel    = { 0, 0 },
+        .spin   = { 0, 0 },
         .color  = RAYWHITE,
         .active = true,
         .is_cue = true,
     };
+
+    s_spin_pick     = (Vector2){ 0, 0 };
+    s_dragging_spin = false;
 }
 
 static bool all_balls_at_rest(void)
@@ -308,6 +338,26 @@ static void resolve_ball_pair(Ball *a, Ball *b, float r)
     Vector2 imp_t = v_scale(tng, jt);
     a->vel = v_sub(a->vel, imp_t);
     b->vel = v_add(b->vel, imp_t);
+
+    /* spin transfer (follow / draw): only the cue carries spin. Compute the
+     * "forward" direction from the cue toward the object ball (line of
+     * centres) and project the cue's stored world-frame spin onto it. The
+     * projected scalar is the follow/draw amount: + for follow, − for draw.
+     * Add that along forward as post-impact velocity, then consume the
+     * forward component of the stored spin since it has been spent. */
+    Ball *cue_b = NULL;
+    Vector2 fwd = { 0, 0 };
+    if (a->is_cue) { cue_b = a; fwd = n; }            /* n points from a → b */
+    else if (b->is_cue) { cue_b = b; fwd = (Vector2){ -n.x, -n.y }; }
+    if (cue_b && (cue_b->spin.x != 0.0f || cue_b->spin.y != 0.0f)) {
+        float spin_fwd = cue_b->spin.x * fwd.x + cue_b->spin.y * fwd.y;
+        float pre_speed = sqrtf(rv.x*rv.x + rv.y*rv.y);
+        Vector2 follow_vel = v_scale(fwd, spin_fwd * SPIN_FOLLOW_GAIN * pre_speed);
+        cue_b->vel = v_add(cue_b->vel, follow_vel);
+
+        cue_b->spin.x -= fwd.x * spin_fwd * 0.7f;
+        cue_b->spin.y -= fwd.y * spin_fwd * 0.7f;
+    }
 }
 
 static void resolve_cushion(Ball *bl, float r)
@@ -326,10 +376,51 @@ static void resolve_cushion(Ball *bl, float r)
     float top    = s_table.felt.y + r;
     float bottom = s_table.felt.y + s_table.felt.height - r;
 
-    if (bl->pos.x < left)   { bl->pos.x = left;   bl->vel.x =  fabsf(bl->vel.x) * WALL_RESTITUTION; bl->vel.y *= CUSHION_TANGENT_KEEP; }
-    if (bl->pos.x > right)  { bl->pos.x = right;  bl->vel.x = -fabsf(bl->vel.x) * WALL_RESTITUTION; bl->vel.y *= CUSHION_TANGENT_KEEP; }
-    if (bl->pos.y < top)    { bl->pos.y = top;    bl->vel.y =  fabsf(bl->vel.y) * WALL_RESTITUTION; bl->vel.x *= CUSHION_TANGENT_KEEP; }
-    if (bl->pos.y > bottom) { bl->pos.y = bottom; bl->vel.y = -fabsf(bl->vel.y) * WALL_RESTITUTION; bl->vel.x *= CUSHION_TANGENT_KEEP; }
+    /* The four rails apply along world axes. For each one that triggers, work
+     * out which axis is "tangent" along the rail and pick the sign of the
+     * ball's stored side English along that tangent. Running English (spin
+     * along the post-bounce tangent direction) keeps more parallel speed and
+     * adds a small kick along the tangent; reverse English does the opposite.
+     * Spent component of spin (along the tangent) is bled to 50%. */
+    int hit_axis = 0; /* 1 = vertical rail (left/right), 2 = horizontal rail (top/bottom) */
+    Vector2 t_axis = { 0, 0 };
+
+    if (bl->pos.x < left)   {
+        bl->pos.x = left;   bl->vel.x =  fabsf(bl->vel.x) * WALL_RESTITUTION;
+        hit_axis = 1; t_axis = (Vector2){ 0.0f, (bl->vel.y >= 0.0f) ?  1.0f : -1.0f };
+    } else if (bl->pos.x > right)  {
+        bl->pos.x = right;  bl->vel.x = -fabsf(bl->vel.x) * WALL_RESTITUTION;
+        hit_axis = 1; t_axis = (Vector2){ 0.0f, (bl->vel.y >= 0.0f) ?  1.0f : -1.0f };
+    }
+    if (bl->pos.y < top)    {
+        bl->pos.y = top;    bl->vel.y =  fabsf(bl->vel.y) * WALL_RESTITUTION;
+        hit_axis = 2; t_axis = (Vector2){ (bl->vel.x >= 0.0f) ?  1.0f : -1.0f, 0.0f };
+    } else if (bl->pos.y > bottom) {
+        bl->pos.y = bottom; bl->vel.y = -fabsf(bl->vel.y) * WALL_RESTITUTION;
+        hit_axis = 2; t_axis = (Vector2){ (bl->vel.x >= 0.0f) ?  1.0f : -1.0f, 0.0f };
+    }
+
+    if (hit_axis == 0) return;
+
+    /* spin along tangent, signed: +1 = running English, -1 = reverse */
+    float spin_t = bl->spin.x * t_axis.x + bl->spin.y * t_axis.y;
+
+    float keep = CUSHION_TANGENT_KEEP + SPIN_ENGLISH_TANGENT * spin_t;
+    if (keep < 0.5f)  keep = 0.5f;
+    if (keep > 1.15f) keep = 1.15f;
+
+    /* damp the parallel component (axis-aligned t_axis: only x or y) */
+    if (hit_axis == 1) bl->vel.y *= keep; else bl->vel.x *= keep;
+
+    /* tangent kick proportional to incoming normal speed */
+    float normal_speed = (hit_axis == 1) ? fabsf(bl->vel.x) : fabsf(bl->vel.y);
+    float kick = SPIN_ENGLISH_ANGLE * normal_speed * spin_t;
+    bl->vel.x += t_axis.x * kick;
+    bl->vel.y += t_axis.y * kick;
+
+    /* consume the tangent component of stored spin */
+    bl->spin.x -= t_axis.x * spin_t * 0.5f;
+    bl->spin.y -= t_axis.y * spin_t * 0.5f;
 }
 
 static void check_pockets(void)
@@ -341,9 +432,12 @@ static void check_pockets(void)
             Vector2 d = v_sub(s_balls[i].pos, s_table.pocket[p]);
             if (v_len(d) < pr) {
                 if (s_balls[i].is_cue) {
-                    /* respawn cue at random kitchen position */
-                    s_balls[i].pos = random_kitchen_pos();
-                    s_balls[i].vel = (Vector2){ 0, 0 };
+                    /* respawn cue at random kitchen position; clear English so
+                     * it doesn't carry into the next shot. */
+                    s_balls[i].pos  = random_kitchen_pos();
+                    s_balls[i].vel  = (Vector2){ 0, 0 };
+                    s_balls[i].spin = (Vector2){ 0, 0 };
+                    s_spin_pick     = (Vector2){ 0, 0 };
                 } else {
                     s_balls[i].active = false;
                 }
@@ -398,12 +492,18 @@ static void integrate(float dt)
             if (!s_balls[i].active) continue;
             float speed = v_len(s_balls[i].vel);
             if (speed <= MIN_SPEED) {
-                s_balls[i].vel = (Vector2){ 0, 0 };
+                s_balls[i].vel  = (Vector2){ 0, 0 };
+                s_balls[i].spin = (Vector2){ 0, 0 };
                 continue;
             }
             float new_speed = speed - FRICTION_DECEL * sdt;
             if (new_speed < 0) new_speed = 0;
             s_balls[i].vel = v_scale(s_balls[i].vel, new_speed / speed);
+
+            /* spin bleeds off exponentially while the ball rolls */
+            float k = expf(-SPIN_DECAY_PER_SEC * sdt);
+            s_balls[i].spin.x *= k;
+            s_balls[i].spin.y *= k;
         }
     }
 }
@@ -456,6 +556,23 @@ static bool poll_pointer(Vector2 *out)
     return IsMouseButtonDown(MOUSE_BUTTON_LEFT);
 }
 
+/* clamp a 2-vector into the unit disk in place */
+static Vector2 clamp_unit_disk(Vector2 v)
+{
+    float l = v_len(v);
+    if (l <= 1.0f) return v;
+    return (Vector2){ v.x / l, v.y / l };
+}
+
+/* picker pointer → spin offset (unit disk). Returns true if ptr is inside the
+ * picker hit area. */
+static bool picker_offset_from(Vector2 ptr, Vector2 *out_offset)
+{
+    Vector2 d = v_sub(ptr, s_picker_center);
+    *out_offset = clamp_unit_disk((Vector2){ d.x / s_picker_r, d.y / s_picker_r });
+    return CheckCollisionPointRec(ptr, s_picker_box);
+}
+
 static void handle_input(void)
 {
     Vector2 ptr;
@@ -464,8 +581,15 @@ static void handle_input(void)
     Ball *cue = &s_balls[s_cue_idx];
 
     if (!s_prev_pressed && pressed) {
-        /* press: toggle button takes priority over starting an aim */
-        if (CheckCollisionPointRec(ptr, s_toggle_btn)) {
+        /* press priority order: picker → toggle button → aim. The picker
+         * has to win first or the existing aim-drag would fire whenever the
+         * player touches inside the picker box. */
+        Vector2 off;
+        if (picker_offset_from(ptr, &off)) {
+            s_dragging_spin = true;
+            s_picker_press  = ptr;
+            s_spin_pick     = off;
+        } else if (CheckCollisionPointRec(ptr, s_toggle_btn)) {
             s_aim_assist = !s_aim_assist;
         } else if (cue->active && all_balls_at_rest()) {
             s_aiming    = true;
@@ -473,9 +597,22 @@ static void handle_input(void)
             s_aim_pos   = ptr;
         }
     } else if (s_prev_pressed && pressed) {
-        if (s_aiming) s_aim_pos = ptr;
+        if (s_dragging_spin) {
+            Vector2 off;
+            picker_offset_from(ptr, &off);
+            s_spin_pick = off;
+        } else if (s_aiming) {
+            s_aim_pos = ptr;
+        }
     } else if (s_prev_pressed && !pressed) {
-        if (s_aiming && cue->active) {
+        if (s_dragging_spin) {
+            /* tap (no significant drag) inside the picker resets to centre */
+            float drag = v_len(v_sub(ptr, s_picker_press));
+            if (drag < s_picker_r * PICKER_RESET_TAP_FRAC) {
+                s_spin_pick = (Vector2){ 0, 0 };
+            }
+            s_dragging_spin = false;
+        } else if (s_aiming && cue->active) {
             /* drag-away: pull pointer back from press to charge; shot goes
              * the OPPOSITE direction. Below the dead zone cancels the shot. */
             Vector2 drag = v_sub(s_aim_pos, s_aim_press);
@@ -483,7 +620,26 @@ static void handle_input(void)
             if (dist > DEAD_ZONE) {
                 Vector2 shot_dir = v_scale(drag, -1.0f / dist);
                 float speed = clampf(dist * power_gain(), 0, MAX_SHOT_SPEED);
+
+                /* off-centre hits scale shot speed (miscue penalty) */
+                float spin_mag2 = s_spin_pick.x * s_spin_pick.x + s_spin_pick.y * s_spin_pick.y;
+                float power_penalty = 1.0f - SPIN_POWER_PENALTY * spin_mag2;
+                speed *= power_penalty;
+
                 cue->vel = v_scale(shot_dir, speed);
+
+                /* rotate picker offset into the shot frame. Screen-y points
+                 * down, so picker.y < 0 = "top of ball" = follow; we negate
+                 * it before mapping to the along-shot axis. picker.x maps
+                 * to the right-perpendicular for side English. */
+                Vector2 along = shot_dir;
+                Vector2 right = { -shot_dir.y, shot_dir.x };
+                float top    = -s_spin_pick.y;   /* +1 when user picked the top of the ball */
+                float side   =  s_spin_pick.x;
+                cue->spin = (Vector2){
+                    along.x * top + right.x * side,
+                    along.y * top + right.y * side,
+                };
             }
         }
         s_aiming = false;
@@ -503,16 +659,43 @@ static void compute_toggle_btn(void)
     s_toggle_btn = (Rectangle){ 10.0f, (float)(fs + 18), w, h };
 }
 
+static void compute_picker(void)
+{
+    float sw = (float)GetScreenWidth();
+    float sh = (float)GetScreenHeight();
+    float long_side = (sw > sh) ? sw : sh;
+
+    float r = long_side * PICKER_R_FRAC;
+    if (r < PICKER_R_MIN) r = PICKER_R_MIN;
+    if (r > PICKER_R_MAX) r = PICKER_R_MAX;
+    s_picker_r = r;
+
+    float margin = long_side * PICKER_MARGIN_FRAC;
+    s_picker_center = (Vector2){ sw - margin - r, sh - margin - r };
+
+    /* hit rect slightly inflated for touch grace */
+    float pad = r * 0.15f;
+    s_picker_box = (Rectangle){
+        s_picker_center.x - r - pad,
+        s_picker_center.y - r - pad,
+        2.0f * (r + pad),
+        2.0f * (r + pad),
+    };
+}
+
 /* ------------------------------------------------------------- prototype impl */
 
 static void PoolInit(void)
 {
     compute_table(&s_table);
     rack_balls();
-    s_aiming       = false;
-    s_aim_assist   = true;
-    s_prev_pressed = false;
+    s_aiming        = false;
+    s_aim_assist    = true;
+    s_prev_pressed  = false;
+    s_dragging_spin = false;
+    s_spin_pick     = (Vector2){ 0, 0 };
     compute_toggle_btn();
+    compute_picker();
 }
 
 static void PoolUpdate(float dt)
@@ -522,6 +705,7 @@ static void PoolUpdate(float dt)
        by the cushion clamp inside integrate(). */
     compute_table(&s_table);
     compute_toggle_btn();
+    compute_picker();
 
     handle_input();
     integrate(dt);
@@ -534,8 +718,10 @@ static void PoolUpdate(float dt)
 
 /* Recursively trace a moving ball's straight-line trajectory until it hits
  * another ball or a cushion. Each hit spawns the next chain link using the
- * line-of-centres rule. `skip_idx` excludes the moving ball from collision. */
-static void trace_chain(Vector2 origin, Vector2 dir, int skip_idx, int depth)
+ * line-of-centres rule. `skip_idx` excludes the moving ball from collision.
+ * `tint` colours the segment so the cue's predicted path can be drawn in a
+ * different colour from the object-ball chain. */
+static void trace_chain(Vector2 origin, Vector2 dir, int skip_idx, int depth, Color tint)
 {
     if (depth >= MAX_CHAIN_DEPTH) return;
     float r = s_table.ball_r;
@@ -553,8 +739,8 @@ static void trace_chain(Vector2 origin, Vector2 dir, int skip_idx, int depth)
 
     unsigned char alpha = (unsigned char)(180 - depth * 20);
     if (alpha < 80) alpha = 80;
-    Color seg_col   = (Color){ 255, 255, 255, alpha };
-    Color ghost_col = (Color){ 255, 255, 255, (unsigned char)(alpha * 3 / 4) };
+    Color seg_col   = (Color){ tint.r, tint.g, tint.b, alpha };
+    Color ghost_col = (Color){ tint.r, tint.g, tint.b, (unsigned char)(alpha * 3 / 4) };
 
     DrawLineEx(origin, end_pt, 2.0f, seg_col);
 
@@ -564,7 +750,7 @@ static void trace_chain(Vector2 origin, Vector2 dir, int skip_idx, int depth)
         float ob_len = v_len(ob_dir);
         if (ob_len > 0.0001f) {
             ob_dir = v_scale(ob_dir, 1.0f / ob_len);
-            trace_chain(s_balls[hit].pos, ob_dir, hit, depth + 1);
+            trace_chain(s_balls[hit].pos, ob_dir, hit, depth + 1, tint);
         }
     }
 }
@@ -617,13 +803,51 @@ static void draw_trajectory(Ball *cue)
         DrawCircleLinesV(cue_end, r, (Color){ 255, 255, 255, 200 });
 
         /* aim assist: simulate the chain — first ball's line of centres,
-         * then recursively whatever that ball would hit, and so on. */
+         * then recursively whatever that ball would hit, and so on. Also
+         * predict the cue ball's own path after impact, accounting for the
+         * follow/draw component of the picker's current spin. */
         if (s_aim_assist) {
             Vector2 ob_dir = v_sub(s_balls[first_hit_idx].pos, cue_end);
             float ob_len = v_len(ob_dir);
             if (ob_len > 0.0001f) {
-                ob_dir = v_scale(ob_dir, 1.0f / ob_len);
-                trace_chain(s_balls[first_hit_idx].pos, ob_dir, first_hit_idx, 0);
+                Vector2 n = v_scale(ob_dir, 1.0f / ob_len);
+                /* object ball chain (white) */
+                trace_chain(s_balls[first_hit_idx].pos, n, first_hit_idx, 0,
+                            (Color){ 255, 255, 255, 255 });
+
+                /* cue's post-impact direction: stun tangent + bend toward the
+                 * line of centres scaled by the follow/draw component of the
+                 * world-frame spin we're about to fire with. When the picker
+                 * is centred this is exactly the 90° tangent line. */
+                Vector2 along = shot_dir;
+                Vector2 right = { -shot_dir.y, shot_dir.x };
+                float top  = -s_spin_pick.y;
+                float side =  s_spin_pick.x;
+                Vector2 spin_world = {
+                    along.x * top + right.x * side,
+                    along.y * top + right.y * side,
+                };
+                float spin_n = spin_world.x * n.x + spin_world.y * n.y;
+
+                /* tangent perpendicular to n, in the same half-plane as shot_dir */
+                Vector2 tng = { -n.y, n.x };
+                if (tng.x * shot_dir.x + tng.y * shot_dir.y < 0.0f) {
+                    tng = (Vector2){ -tng.x, -tng.y };
+                }
+
+                Vector2 cue_after = {
+                    tng.x + n.x * spin_n * AIM_FOLLOW_PREVIEW,
+                    tng.y + n.y * spin_n * AIM_FOLLOW_PREVIEW,
+                };
+                float cl = v_len(cue_after);
+                if (cl > 0.0001f) {
+                    cue_after = v_scale(cue_after, 1.0f / cl);
+                    /* cue chain (cyan-ish) — first segment starts at cue_end and
+                     * we skip the just-hit object ball to avoid a 0-distance
+                     * re-collision. */
+                    trace_chain(cue_end, cue_after, first_hit_idx, 0,
+                                (Color){ 120, 220, 255, 255 });
+                }
             }
         }
     }
@@ -639,6 +863,43 @@ static void draw_trajectory(Ball *cue)
     Rectangle fg = bg;
     fg.width = bar_len * power_t;
     DrawRectangleRec(fg, line_col);
+}
+
+static void draw_picker(void)
+{
+    /* faint backing disk so the picker reads against the felt */
+    DrawCircleV(s_picker_center, s_picker_r + 6.0f, (Color){ 0, 0, 0, 110 });
+
+    /* "cue ball" face */
+    DrawCircleV(s_picker_center, s_picker_r, (Color){ 235, 235, 230, 230 });
+    DrawCircleLinesV(s_picker_center, s_picker_r, (Color){ 40, 40, 40, 220 });
+
+    /* crosshair */
+    Color cross = (Color){ 80, 80, 80, 180 };
+    DrawLineEx((Vector2){ s_picker_center.x - s_picker_r * 0.85f, s_picker_center.y },
+               (Vector2){ s_picker_center.x + s_picker_r * 0.85f, s_picker_center.y },
+               1.0f, cross);
+    DrawLineEx((Vector2){ s_picker_center.x, s_picker_center.y - s_picker_r * 0.85f },
+               (Vector2){ s_picker_center.x, s_picker_center.y + s_picker_r * 0.85f },
+               1.0f, cross);
+
+    /* draggable dot */
+    Vector2 dot = {
+        s_picker_center.x + s_spin_pick.x * s_picker_r,
+        s_picker_center.y + s_spin_pick.y * s_picker_r,
+    };
+    float spin_mag = v_len(s_spin_pick);
+    bool miscue = spin_mag > MISCUE_THRESHOLD;
+
+    Color dot_col = miscue ? (Color){ 220, 60, 60, 240 }
+                           : (Color){ 30, 90, 200, 240 };
+    DrawCircleV(dot, s_picker_r * 0.18f, dot_col);
+    DrawCircleLinesV(dot, s_picker_r * 0.18f, (Color){ 20, 20, 20, 220 });
+
+    if (miscue) {
+        DrawCircleLinesV(s_picker_center, s_picker_r * (MISCUE_THRESHOLD),
+                         (Color){ 220, 60, 60, 200 });
+    }
 }
 
 static void draw_toggle_btn(void)
@@ -686,10 +947,11 @@ static void PoolDraw(void)
 
     int fs = GetScreenWidth() / 50;
     if (fs < 14) fs = 14;
-    DrawText("Drag away from the cue ball to aim. Release to shoot.  R: rerack",
+    DrawText("Drag from cue to aim. Drag the dot in the bottom-right circle for spin.  R: rerack",
              10, 10, fs, RAYWHITE);
 
     draw_toggle_btn();
+    draw_picker();
 }
 
 static void PoolDeinit(void)
