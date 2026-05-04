@@ -49,6 +49,8 @@
 #define POPUP_LIFETIME   1.4f        /* seconds a score popup lives     */
 #define POPUP_FLOAT      2.2f        /* cells upward over its lifetime  */
 #define MAX_SCORE_POPUPS 16
+#define KEEP_MAX_HP      100         /* player base starting hit points */
+#define SIM_STUB_SECS    3.0f        /* Phase 1: sim placeholder length */
 
 /* ------------------------------------------------------------------- types */
 
@@ -61,7 +63,7 @@ typedef enum {
     TERRAIN_COUNT
 } Terrain;
 
-typedef enum { PHASE_IDLE, PHASE_DRAGGING, PHASE_SCANNING } Phase;
+typedef enum { PHASE_IDLE, PHASE_DRAGGING, PHASE_SCANNING, PHASE_SIM } Phase;
 
 typedef enum {
     STRUCT_NONE = 0,
@@ -76,6 +78,8 @@ typedef enum {
     STRUCT_FOREST_CORNER,  /* L-shape 3× Forest (4 rotations)  */
     STRUCT_RIVER_BEND,     /* L-shape 4× Water  (4 rotations)  */
     STRUCT_CROSSROADS,     /* + shape  5× City  (symmetric)    */
+    STRUCT_KEEP,           /* 2×2 player base   — pre-placed   */
+    STRUCT_ENEMY_CASTLE,   /* 2×2 enemy spawner — pre-placed   */
     STRUCT_TYPE_COUNT
 } StructureType;
 
@@ -86,6 +90,7 @@ typedef struct {
     int           cell_count;
     int           cell_dc[MAX_STRUCT_CELLS];  /* offsets from (col, row)   */
     int           cell_dr[MAX_STRUCT_CELLS];
+    bool          pinned;                     /* cannot be displaced       */
 } Structure;
 
 typedef struct {
@@ -169,6 +174,11 @@ static int        s_turn_count;
 static bool       s_game_over;
 static ScorePopup s_popups[MAX_SCORE_POPUPS];
 
+/* ---- game-frame state (Phase 1) ---- */
+static int        s_round;
+static int        s_keep_hp;
+static float      s_sim_timer;
+
 /* -------------------------------------------------------------- data tables */
 
 static const Color TERRAIN_COLOR[TERRAIN_COUNT] = {
@@ -194,12 +204,14 @@ static const Color STRUCT_COLOR[STRUCT_TYPE_COUNT] = {
     {  60, 225, 115, 255 }, /* FOREST_CORNER  – bright teal     */
     {  75, 195, 255, 255 }, /* RIVER_BEND     – bright cyan     */
     { 255, 200,  65, 255 }, /* CROSSROADS     – warm gold       */
+    { 100, 255, 160, 255 }, /* KEEP           – bright mint     */
+    { 220,  60,  60, 255 }, /* ENEMY_CASTLE   – vivid red       */
 };
 
 static const char *STRUCT_LABEL[STRUCT_TYPE_COUNT] = {
     "", "Dense Forest", "Farm", "Castle",
     "Lumber Camp", "River", "Wheat Field", "Road", "Quarry",
-    "Forest Corner", "River Bend", "Crossroads"
+    "Forest Corner", "River Bend", "Crossroads", "Keep", "Enemy Castle"
 };
 
 /* ---------------------------------------------------------- layout helpers */
@@ -263,6 +275,22 @@ static Rectangle legend_tab_rect(void)
     int sh    = GetScreenHeight();
     int tab_h = sh * 7 / 100;
     return (Rectangle){ 0, (float)(sh - tab_h), (float)sw, (float)tab_h };
+}
+
+/* Submit button: centred above the legend tab, visible during build phase */
+static Rectangle submit_button_rect(void)
+{
+    int sw    = GetScreenWidth();
+    int sh    = GetScreenHeight();
+    int leg_h = sh * 7 / 100;
+    int btn_w = sw * 22 / 100;
+    int btn_h = sh *  7 / 100;
+    return (Rectangle){
+        (float)(sw - btn_w) / 2.0f,
+        (float)(sh - leg_h - btn_h - sh / 60),
+        (float)btn_w,
+        (float)btn_h,
+    };
 }
 
 /* Legend body: slides up from behind the tab */
@@ -382,6 +410,7 @@ static bool advance_hero(int new_col, int new_row)
 
     int si = s_cell_struct[new_row][new_col];
     if (si >= 0) {
+        if (s_structures[si].pinned) return false;  /* Keep / Enemy Castle — immovable */
         /* Destination is part of a combined tile — push the whole thing. */
         if (!shift_structure(new_col, new_row, si)) {
             /* Structure can't move (wall, other structure) — block the hero. */
@@ -442,6 +471,33 @@ static void clear_structures(void)
     for (int r = 0; r < MAP_ROWS; r++)
         for (int c = 0; c < MAP_COLS; c++)
             s_cell_struct[r][c] = -1;
+}
+
+/* Place a pinned (immovable) structure directly on the map.
+ * Sets terrain under each cell to `fill` and locks the cells. */
+static void place_pinned_structure(StructureType type,
+                                   int col, int row, int w, int h,
+                                   Terrain fill)
+{
+    if (s_structure_count >= MAX_STRUCTURES) return;
+    int idx = s_structure_count++;
+    Structure *s = &s_structures[idx];
+    s->type       = type;
+    s->col        = col;
+    s->row        = row;
+    s->w          = w;
+    s->h          = h;
+    s->pinned     = true;
+    s->cell_count = 0;
+    for (int dr = 0; dr < h; dr++) {
+        for (int dc = 0; dc < w; dc++) {
+            s->cell_dc[s->cell_count] = dc;
+            s->cell_dr[s->cell_count] = dr;
+            s_cell_struct[row + dr][col + dc] = idx;
+            s_map[row + dr][col + dc]         = fill;
+            s->cell_count++;
+        }
+    }
 }
 
 static bool cell_has_hero(int col, int row)
@@ -744,7 +800,7 @@ static void award_turn_score(void)
     }
 
     s_score += total;
-    if (s_turn_count >= TURNS_LIMIT) s_game_over = true;
+    /* game-over comes from Keep HP in Phase 3+; TURNS_LIMIT no longer ends game */
 }
 
 static void end_turn(void)
@@ -775,6 +831,14 @@ static void generate_map(void)
 }
 
 /* ----------------------------------------------------------- input callbacks */
+
+static void submit_build(void)
+{
+    if (s_phase != PHASE_IDLE || s_game_over) return;
+    s_trail_len = 0;
+    s_phase     = PHASE_SIM;
+    s_sim_timer = SIM_STUB_SECS;
+}
 
 static void on_down(Vector2 pos)
 {
@@ -842,6 +906,14 @@ static void on_up(Vector2 pos)
         return;
     }
 
+    /* Submit / March button */
+    if (!s_game_over && s_phase == PHASE_IDLE) {
+        if (CheckCollisionPointRec(pos, submit_button_rect())) {
+            submit_build();
+            return;
+        }
+    }
+
     /* HUD tab toggle */
     if (CheckCollisionPointRec(pos, hud_tab_rect())) {
         s_hud_open = !s_hud_open;
@@ -867,6 +939,8 @@ static const Terrain STRUCT_TERRAIN[STRUCT_TYPE_COUNT] = {
     TERRAIN_FOREST,    /* FOREST_CORNER  */
     TERRAIN_WATER,     /* RIVER_BEND     */
     TERRAIN_CITY,      /* CROSSROADS     */
+    TERRAIN_CITY,      /* KEEP           */
+    TERRAIN_MOUNTAIN,  /* ENEMY_CASTLE   */
 };
 
 /* --------------------------------------------------------------- rendering */
@@ -1155,7 +1229,6 @@ static void draw_timer_bar(void)
 static void draw_resource_strip(void)
 {
     int sw  = GetScreenWidth();
-    int sh  = GetScreenHeight();
     int pad = sw / 30;
 
     /* --- body slides down from below the tab --- */
@@ -1187,50 +1260,49 @@ static void draw_resource_strip(void)
                 int vw = MeasureText(buf, lfs);
                 DrawText(buf, sw - vw - pad, ry + (row_h - lfs) / 2, lfs, vc);
             }
-            /* --- row 1: Goal --- */
+            /* --- row 1: Keep HP --- */
             {
                 int ry = oy + row_h;
-                DrawText("Goal", pad, ry + (row_h - lfs) / 2, lfs,
+                DrawText("Keep HP", pad, ry + (row_h - lfs) / 2, lfs,
                          (Color){ 140, 150, 170, 200 });
                 char buf[24];
-                snprintf(buf, sizeof(buf), "%d", SCORE_GOAL);
+                snprintf(buf, sizeof(buf), "%d / %d", s_keep_hp, KEEP_MAX_HP);
+                Color hpc = (s_keep_hp > KEEP_MAX_HP / 2) ? (Color){ 100, 240, 100, 255 }
+                          : (s_keep_hp > KEEP_MAX_HP / 4) ? (Color){ 255, 160,  60, 255 }
+                          :                                   (Color){ 255,  80,  80, 255 };
                 int vw = MeasureText(buf, lfs);
-                DrawText(buf, sw - vw - pad, ry + (row_h - lfs) / 2, lfs,
-                         (Color){ 180, 190, 210, 220 });
+                DrawText(buf, sw - vw - pad, ry + (row_h - lfs) / 2, lfs, hpc);
             }
-            /* --- row 2: Turn --- */
+            /* --- row 2: Round --- */
             {
                 int ry = oy + row_h * 2;
-                DrawText("Turn", pad, ry + (row_h - lfs) / 2, lfs,
+                DrawText("Round", pad, ry + (row_h - lfs) / 2, lfs,
                          (Color){ 140, 150, 170, 200 });
                 char buf[24];
-                snprintf(buf, sizeof(buf), "%d / %d", s_turn_count, TURNS_LIMIT);
-                int turns_left = TURNS_LIMIT - s_turn_count;
-                Color vc = (turns_left <= 0)
-                               ? (Color){ 255,  80,  80, 255 }
-                           : (turns_left <= TURNS_LIMIT * 3 / 10)
-                               ? (Color){ 255, 160,  60, 255 }
-                           :   (Color){ 200, 200, 200, 220 };
+                snprintf(buf, sizeof(buf), "%d", s_round);
                 int vw = MeasureText(buf, lfs);
-                DrawText(buf, sw - vw - pad, ry + (row_h - lfs) / 2, lfs, vc);
+                DrawText(buf, sw - vw - pad, ry + (row_h - lfs) / 2, lfs,
+                         (Color){ 200, 200, 200, 220 });
             }
             /* --- progress bar --- */
             {
                 int by   = oy + row_h * 3;
-                float prog = (float)s_score / (float)SCORE_GOAL;
+                float prog = (float)s_keep_hp / (float)KEEP_MAX_HP;
                 if (prog > 1.0f) prog = 1.0f;
                 int bw = sw - pad * 2;
                 DrawRectangle(pad, by, bw, bar_h,
                               (Color){ 20, 20, 28, 230 });
-                DrawRectangle(pad, by, (int)(bw * prog), bar_h,
-                              (Color){ 255, 200, 65, 230 });
+                Color bar_col = (prog > 0.5f) ? (Color){ 100, 220, 100, 230 }
+                              : (prog > 0.25f) ? (Color){ 220, 160,  60, 230 }
+                              :                  (Color){ 220,  60,  60, 230 };
+                DrawRectangle(pad, by, (int)(bw * prog), bar_h, bar_col);
                 DrawRectangleLinesEx(
                     (Rectangle){ (float)pad, (float)by,
                                  (float)bw,  (float)bar_h },
                     1.0f, (Color){ 220, 80, 255, 160 });
-                /* percentage inside bar */
+                /* HP % inside bar */
                 char pct[16];
-                snprintf(pct, sizeof(pct), "%d%%", (int)(prog * 100.0f));
+                snprintf(pct, sizeof(pct), "Keep %d%%", (int)(prog * 100.0f));
                 int pfs = bar_h * 60 / 100;
                 if (pfs < 10) pfs = 10;
                 int pw = MeasureText(pct, pfs);
@@ -1255,16 +1327,13 @@ static void draw_resource_strip(void)
                                        : (Color){ 255, 215,  70, 255 };
     DrawText(score_buf, pad, (tab_h - fs) / 2, fs, sc);
 
-    char turn_buf[24];
-    snprintf(turn_buf, sizeof(turn_buf), "%d/%d", s_turn_count, TURNS_LIMIT);
-    int tw = MeasureText(turn_buf, fs);
-    int turns_left = TURNS_LIMIT - s_turn_count;
-    Color tc = (turns_left <= 0)
-                   ? (Color){ 255,  80,  80, 255 }
-               : (turns_left <= TURNS_LIMIT * 3 / 10)
-                   ? (Color){ 255, 160,  60, 255 }
-               :   (Color){ 200, 200, 200, 220 };
-    DrawText(turn_buf, sw - tw - pad, (tab_h - fs) / 2, fs, tc);
+    char round_buf[24];
+    snprintf(round_buf, sizeof(round_buf),
+             s_phase == PHASE_SIM ? "SIM" : "R%d", s_round);
+    int rw = MeasureText(round_buf, fs);
+    Color rc = (s_phase == PHASE_SIM) ? (Color){ 100, 200, 100, 255 }
+                                      : (Color){ 200, 200, 200, 220 };
+    DrawText(round_buf, sw - rw - pad, (tab_h - fs) / 2, fs, rc);
 
     const char *arrow = s_hud_open ? "^" : "v";
     int aw = MeasureText(arrow, fs);
@@ -1500,6 +1569,58 @@ static void draw_legend(void)
     }
 }
 
+static void draw_submit_button(void)
+{
+    if (s_phase != PHASE_IDLE || s_game_over) return;
+    Rectangle r = submit_button_rect();
+    float pulse = 0.85f + 0.15f * sinf((float)GetTime() * 4.0f);
+    Color bg  = { (unsigned char)(200 * pulse),
+                  (unsigned char)(160 * pulse),
+                  20, 230 };
+    DrawRectangleRounded(r, 0.35f, 6, bg);
+    DrawRectangleLinesEx(r, 2.0f, (Color){ 255, 215, 60, 255 });
+    const char *label = "MARCH!";
+    int fs = (int)(r.height * 0.46f);
+    if (fs < 12) fs = 12;
+    int lw = MeasureText(label, fs);
+    DrawText(label,
+             (int)(r.x + (r.width  - lw) / 2),
+             (int)(r.y + (r.height - fs) / 2),
+             fs, (Color){ 255, 245, 180, 255 });
+}
+
+static void draw_sim_overlay(void)
+{
+    if (s_phase != PHASE_SIM) return;
+    int sw = GetScreenWidth(), sh = GetScreenHeight();
+    DrawRectangle(0, 0, sw, sh, (Color){ 0, 0, 0, 160 });
+
+    float prog = 1.0f - s_sim_timer / SIM_STUB_SECS;
+
+    const char *label = "Simulating...";
+    int fs = sh / 8;
+    int lw = MeasureText(label, fs);
+    DrawText(label, (sw - lw) / 2, sh * 2 / 5, fs,
+             (Color){ 255, 200, 60, 255 });
+
+    /* progress bar */
+    int bw = sw * 3 / 5;
+    int bh = sh / 28;
+    int bx = (sw - bw) / 2;
+    int by = sh * 2 / 5 + fs + sh / 20;
+    DrawRectangle(bx, by, bw, bh, (Color){ 30, 30, 40, 220 });
+    DrawRectangle(bx, by, (int)(bw * prog), bh, (Color){ 100, 200, 100, 220 });
+    DrawRectangleLinesEx(
+        (Rectangle){ (float)bx, (float)by, (float)bw, (float)bh },
+        1.5f, (Color){ 100, 200, 100, 180 });
+
+    const char *hint = "Phase 2 coming soon";
+    int hfs = sh / 26;
+    int hw  = MeasureText(hint, hfs);
+    DrawText(hint, (sw - hw) / 2, by + bh + sh / 25,
+             hfs, (Color){ 140, 140, 150, 180 });
+}
+
 /* ------------------------------------------------- prototype callbacks */
 
 static void RealmWalkInit(void)
@@ -1507,6 +1628,15 @@ static void RealmWalkInit(void)
     generate_map();
     clear_structures();
 
+    /* Pre-place pinned structures before positioning the hero */
+    /* Keep (player base) — bottom-centre */
+    place_pinned_structure(STRUCT_KEEP,
+                           MAP_COLS / 2 - 1, MAP_ROWS - 4, 2, 2, TERRAIN_CITY);
+    /* Enemy castles — top-left and top-right corners */
+    place_pinned_structure(STRUCT_ENEMY_CASTLE,            2, 1, 2, 2, TERRAIN_MOUNTAIN);
+    place_pinned_structure(STRUCT_ENEMY_CASTLE, MAP_COLS - 4, 1, 2, 2, TERRAIN_MOUNTAIN);
+
+    /* Start hero in the middle of the map, well clear of all pinned structures */
     s_hero_col = MAP_COLS / 2;
     s_hero_row = MAP_ROWS / 2;
 
@@ -1538,6 +1668,11 @@ static void RealmWalkInit(void)
     s_game_over  = false;
     for (int _pi = 0; _pi < MAX_SCORE_POPUPS; _pi++)
         s_popups[_pi].active = false;
+
+    /* game-frame state */
+    s_round     = 1;
+    s_keep_hp   = KEEP_MAX_HP;
+    s_sim_timer = 0.0f;
 
     s_is_dragging       = false;
     s_phase             = PHASE_IDLE;
@@ -1600,6 +1735,16 @@ static void RealmWalkUpdate(float dt)
         if (s_scan_flash <= 0.0f) {
             s_scan_flash = 0.0f;
             s_phase      = PHASE_IDLE;
+        }
+    }
+
+    /* simulation countdown → next build round */
+    if (s_phase == PHASE_SIM) {
+        s_sim_timer -= dt;
+        if (s_sim_timer <= 0.0f) {
+            s_sim_timer = 0.0f;
+            s_round++;
+            s_phase = PHASE_IDLE;
         }
     }
 
@@ -1731,7 +1876,9 @@ static void RealmWalkDraw(void)
     draw_score_popups();
     draw_resource_strip();
     draw_timer_bar();
+    draw_submit_button();
     draw_legend();
+    draw_sim_overlay();
     draw_end_game();
 }
 
