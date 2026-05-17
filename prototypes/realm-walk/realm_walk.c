@@ -102,7 +102,16 @@ typedef struct {
     bool  active;
 } ScorePopup;
 
-#define MAX_STRUCTURES 32
+#define MAX_STRUCTURES  32
+#define MAX_ORDER_REQS   3   /* terrain requirements per order */
+#define ORDER_COUNT      4   /* orders shown simultaneously    */
+#define MAX_GROUPS     300   /* max connected same-terrain groups on map */
+
+typedef struct {
+    Terrain terrain[MAX_ORDER_REQS];
+    int     min_size[MAX_ORDER_REQS];
+    int     req_count;
+} Order;
 
 /* ------------------------------------------------------------ module state */
 
@@ -119,6 +128,7 @@ static float s_turn_timer;
 static int   s_trail_col[MAX_TRAIL];
 static int   s_trail_row[MAX_TRAIL];
 static int   s_trail_len;
+static int   s_pending_moves;    /* moves taken since last cash-in */
 
 /* scan tracking */
 static bool s_col_visited[MAP_COLS];
@@ -168,6 +178,18 @@ static int        s_score;
 static int        s_turn_count;
 static bool       s_game_over;
 static ScorePopup s_popups[MAX_SCORE_POPUPS];
+
+/* ---- orders ---- */
+static Order s_orders[ORDER_COUNT];
+
+/* ---- group data (rebuilt on cash-in) ---- */
+static int s_group_map[MAP_ROWS][MAP_COLS];         /* cell → group idx, -1 = none */
+static int s_group_terrain[MAX_GROUPS];
+static int s_group_size[MAX_GROUPS];
+static int s_group_start[MAX_GROUPS + 1];           /* prefix offsets into flat arrays */
+static int s_group_col_flat[MAP_ROWS * MAP_COLS];
+static int s_group_row_flat[MAP_ROWS * MAP_COLS];
+static int s_group_count;
 
 /* -------------------------------------------------------------- data tables */
 
@@ -254,6 +276,22 @@ static Rectangle hud_body_rect(void)
     int body_h = sh * 22 / 100;
     float y = (float)tab_h + (s_hud_t - 1.0f) * (float)body_h;
     return (Rectangle){ 0, y, (float)sw, (float)body_h };
+}
+
+/* Cash In button: lower-right corner, just above the legend tab */
+static Rectangle cashin_btn_rect(void)
+{
+    int sw     = GetScreenWidth();
+    int sh     = GetScreenHeight();
+    int bh     = sh * 8 / 100;
+    int bw     = sw * 22 / 100;
+    int leg_h  = sh * 7 / 100;
+    int margin = sh * 2 / 100;
+    return (Rectangle){
+        (float)(sw - bw - margin),
+        (float)(sh - leg_h - bh - margin),
+        (float)bw, (float)bh
+    };
 }
 
 /* Legend tab: fixed strip at the very bottom of the screen */
@@ -747,14 +785,256 @@ static void award_turn_score(void)
     if (s_turn_count >= TURNS_LIMIT) s_game_over = true;
 }
 
+/* Build connected same-terrain groups via BFS; populates all s_group_* state. */
+static void build_groups(void)
+{
+    static bool visited[MAP_ROWS][MAP_COLS];
+    static int  bfs_col[MAP_ROWS * MAP_COLS];
+    static int  bfs_row[MAP_ROWS * MAP_COLS];
+
+    static const int dc4[4] = { 0,  0,  1, -1 };
+    static const int dr4[4] = { 1, -1,  0,  0 };
+
+    memset(visited,      0,   sizeof(visited));
+    memset(s_group_map, -1,   sizeof(s_group_map));
+    s_group_count  = 0;
+    int flat_idx   = 0;
+    s_group_start[0] = 0;
+
+    for (int sr = 0; sr < MAP_ROWS; sr++) {
+        for (int sc = 0; sc < MAP_COLS; sc++) {
+            if (visited[sr][sc]) continue;
+            if (s_group_count >= MAX_GROUPS) break;
+
+            Terrain t  = s_map[sr][sc];
+            int head   = 0, tail = 0;
+            bfs_col[tail] = sc; bfs_row[tail] = sr; tail++;
+            visited[sr][sc] = true;
+
+            while (head < tail) {
+                int c = bfs_col[head], r = bfs_row[head]; head++;
+                s_group_map[r][c] = s_group_count;
+                s_group_col_flat[flat_idx] = c;
+                s_group_row_flat[flat_idx] = r;
+                flat_idx++;
+
+                for (int d = 0; d < 4; d++) {
+                    int nc = c + dc4[d], nr = r + dr4[d];
+                    if (nc < 0 || nc >= MAP_COLS || nr < 0 || nr >= MAP_ROWS) continue;
+                    if (visited[nr][nc]) continue;
+                    if (s_map[nr][nc] != t) continue;
+                    visited[nr][nc] = true;
+                    bfs_col[tail] = nc; bfs_row[tail] = nr; tail++;
+                }
+            }
+
+            s_group_terrain[s_group_count] = t;
+            s_group_size[s_group_count]    = tail;
+            s_group_count++;
+            s_group_start[s_group_count]   = flat_idx;
+        }
+    }
+}
+
+static bool groups_adjacent(int ga, int gb)
+{
+    static const int dc4[4] = { 0,  0,  1, -1 };
+    static const int dr4[4] = { 1, -1,  0,  0 };
+    int start = s_group_start[ga], end = s_group_start[ga + 1];
+    for (int i = start; i < end; i++) {
+        int c = s_group_col_flat[i], r = s_group_row_flat[i];
+        for (int d = 0; d < 4; d++) {
+            int nc = c + dc4[d], nr = r + dr4[d];
+            if (nc < 0 || nc >= MAP_COLS || nr < 0 || nr >= MAP_ROWS) continue;
+            if (s_group_map[nr][nc] == gb) return true;
+        }
+    }
+    return false;
+}
+
+/* Check that the n selected groups form a connected subgraph (each group
+ * can reach every other via adjacency).  Uses a simple BFS on group indices. */
+static bool order_groups_connected(int *gidx, int n)
+{
+    if (n <= 1) return true;
+    bool reached[MAX_ORDER_REQS] = { false };
+    int  queue[MAX_ORDER_REQS];
+    reached[0] = true;
+    queue[0]   = 0;
+    int head = 0, tail = 1;
+    while (head < tail) {
+        int a = queue[head++];
+        for (int b = 0; b < n; b++) {
+            if (reached[b]) continue;
+            if (groups_adjacent(gidx[a], gidx[b])) {
+                reached[b]    = true;
+                queue[tail++] = b;
+            }
+        }
+    }
+    for (int i = 0; i < n; i++) if (!reached[i]) return false;
+    return true;
+}
+
+static Order generate_order(void)
+{
+    Order o;
+    o.req_count = GetRandomValue(1, MAX_ORDER_REQS);
+    bool used[TERRAIN_COUNT] = { false };
+    for (int i = 0; i < o.req_count; i++) {
+        /* pick unused terrain type */
+        int t;
+        do { t = GetRandomValue(0, TERRAIN_COUNT - 1); } while (used[t]);
+        used[t] = true;
+        o.terrain[i]  = (Terrain)t;
+        o.min_size[i] = GetRandomValue(2, 5);
+    }
+    return o;
+}
+
+/* Remove cells belonging to groups in gidx[0..n-1] from the map.
+ * Handles structure cleanup, flash registration, and scoring. */
+static void remove_groups(int *gidx, int n)
+{
+    static bool struct_remove[MAX_STRUCTURES];
+    memset(struct_remove, 0, sizeof(struct_remove));
+
+    int total_cells = 0;
+    float sum_c = 0.0f, sum_r = 0.0f;
+
+    for (int gi = 0; gi < n; gi++) {
+        int g = gidx[gi];
+        int start = s_group_start[g], end = s_group_start[g + 1];
+        total_cells += end - start;
+        for (int i = start; i < end; i++) {
+            int c = s_group_col_flat[i], r = s_group_row_flat[i];
+            sum_c += (float)c; sum_r += (float)r;
+            int si = s_cell_struct[r][c];
+            if (si >= 0) struct_remove[si] = true;
+        }
+    }
+
+    /* Clear structure footprints */
+    for (int i = 0; i < s_structure_count; i++) {
+        if (!struct_remove[i]) continue;
+        Structure *s = &s_structures[i];
+        for (int ci = 0; ci < s->cell_count; ci++)
+            s_cell_struct[s->row + s->cell_dr[ci]][s->col + s->cell_dc[ci]] = -1;
+    }
+    /* Compact s_structures[] */
+    int new_count = 0;
+    for (int i = 0; i < s_structure_count; i++) {
+        if (struct_remove[i]) continue;
+        if (new_count != i) {
+            s_structures[new_count] = s_structures[i];
+            Structure *s = &s_structures[new_count];
+            for (int ci = 0; ci < s->cell_count; ci++)
+                s_cell_struct[s->row + s->cell_dr[ci]][s->col + s->cell_dc[ci]] = new_count;
+        }
+        new_count++;
+    }
+    s_structure_count = new_count;
+
+    /* Replace terrain, record flash */
+    for (int gi = 0; gi < n; gi++) {
+        int g = gidx[gi];
+        int start = s_group_start[g], end = s_group_start[g + 1];
+        for (int i = start; i < end; i++) {
+            int c = s_group_col_flat[i], r = s_group_row_flat[i];
+            s_map[r][c] = (Terrain)GetRandomValue(0, TERRAIN_COUNT - 1);
+            if (s_flash_count < MAX_FLASH_CELLS) {
+                s_flash_col[s_flash_count] = c;
+                s_flash_row[s_flash_count] = r;
+                s_flash_count++;
+            }
+        }
+    }
+
+    /* Score popup centred on removed cells */
+    int pts = total_cells * 10;
+    spawn_popup(sum_c / (float)total_cells,
+                sum_r / (float)total_cells - 0.5f, pts);
+    s_score += pts;
+}
+
+static void cashin_resolve(void)
+{
+    build_groups();
+
+    bool any_fulfilled = false;
+    s_flash_count = 0;
+
+    for (int oi = 0; oi < ORDER_COUNT; oi++) {
+        Order *ord = &s_orders[oi];
+
+        /* Collect candidate groups for each requirement */
+        int  cands[MAX_ORDER_REQS][MAX_GROUPS];
+        int  cand_count[MAX_ORDER_REQS];
+        memset(cand_count, 0, sizeof(cand_count));
+
+        for (int ri = 0; ri < ord->req_count; ri++) {
+            for (int g = 0; g < s_group_count; g++) {
+                if (s_group_terrain[g] == ord->terrain[ri] &&
+                    s_group_size[g]    >= ord->min_size[ri])
+                    cands[ri][cand_count[ri]++] = g;
+            }
+            if (cand_count[ri] == 0) goto next_order;
+        }
+
+        /* Try all combinations (one group per requirement); all groups
+         * must be distinct and their union must be connected. */
+        {
+            int gidx[MAX_ORDER_REQS];
+            bool found = false;
+
+            /* Simple nested iteration up to MAX_ORDER_REQS = 3 */
+            for (int a = 0; a < cand_count[0] && !found; a++) {
+                gidx[0] = cands[0][a];
+                if (ord->req_count == 1) {
+                    found = true; break;
+                }
+                for (int b = 0; b < cand_count[1] && !found; b++) {
+                    if (cands[1][b] == gidx[0]) continue;
+                    gidx[1] = cands[1][b];
+                    if (ord->req_count == 2) {
+                        if (order_groups_connected(gidx, 2)) { found = true; break; }
+                        continue;
+                    }
+                    for (int c = 0; c < cand_count[2] && !found; c++) {
+                        if (cands[2][c] == gidx[0] || cands[2][c] == gidx[1]) continue;
+                        gidx[2] = cands[2][c];
+                        if (order_groups_connected(gidx, 3)) { found = true; break; }
+                    }
+                }
+            }
+
+            if (found) {
+                remove_groups(gidx, ord->req_count);
+                s_orders[oi] = generate_order();
+                any_fulfilled = true;
+                /* Rebuild groups so subsequent orders see updated map */
+                build_groups();
+            }
+        }
+
+        next_order:;
+    }
+
+    s_pending_moves = 0;
+
+    if (any_fulfilled) {
+        s_phase      = PHASE_SCANNING;
+        s_scan_flash = SCAN_FLASH_SECS;
+    }
+}
+
 static void end_turn(void)
 {
-    s_is_dragging = false;
-    s_flash_count = 0;
-    scan_matches();
+    s_is_dragging   = false;
+    s_flash_count   = 0;
+    s_pending_moves++;
     award_turn_score();
-    s_phase      = PHASE_SCANNING;
-    s_scan_flash = (s_flash_count > 0) ? SCAN_FLASH_SECS : 0.0f;
+    s_phase      = PHASE_IDLE;
     s_turn_timer = TURN_SECS;
 }
 
@@ -851,6 +1131,12 @@ static void on_up(Vector2 pos)
     /* legend tab toggle */
     if (CheckCollisionPointRec(pos, legend_tab_rect())) {
         s_legend_open = !s_legend_open;
+        return;
+    }
+
+    /* cash-in button */
+    if (s_phase == PHASE_IDLE && CheckCollisionPointRec(pos, cashin_btn_rect())) {
+        cashin_resolve();
     }
 }
 
@@ -871,59 +1157,15 @@ static const Terrain STRUCT_TERRAIN[STRUCT_TYPE_COUNT] = {
 
 /* --------------------------------------------------------------- rendering */
 
-/* Draw a terrain-specific icon centered at (cx, cy), scaled by s (= tw/3). */
+/* Draw a terrain letter centered at (cx, cy), scaled by s (= tw/3). */
 static void draw_terrain_icon(int cx, int cy, int s, Terrain t, Color c)
 {
-    switch (t) {
-    case TERRAIN_PLAINS:
-        /* circle dot */
-        DrawCircle(cx, cy, s * 42 / 100, c);
-        break;
-    case TERRAIN_FOREST:
-        /* tree: upward triangle canopy + small trunk */
-        DrawTriangle(
-            (Vector2){ (float)cx,           (float)(cy - s * 58 / 100) },
-            (Vector2){ (float)(cx + s),     (float)(cy + s * 42 / 100) },
-            (Vector2){ (float)(cx - s),     (float)(cy + s * 42 / 100) }, c);
-        DrawRectangle(cx - s * 14 / 100, cy + s * 42 / 100,
-                      s * 28 / 100, s * 22 / 100, c);
-        break;
-    case TERRAIN_MOUNTAIN:
-        /* main peak */
-        DrawTriangle(
-            (Vector2){ (float)cx,             (float)(cy - s * 68 / 100) },
-            (Vector2){ (float)(cx + s),       (float)(cy + s * 32 / 100) },
-            (Vector2){ (float)(cx - s),       (float)(cy + s * 32 / 100) }, c);
-        /* second smaller peak behind-left */
-        DrawTriangle(
-            (Vector2){ (float)(cx - s * 42 / 100), (float)(cy - s * 28 / 100) },
-            (Vector2){ (float)(cx + s * 10 / 100), (float)(cy + s * 32 / 100) },
-            (Vector2){ (float)(cx - s * 115 / 100),(float)(cy + s * 32 / 100) },
-            (Color){ c.r, c.g, c.b, 150 });
-        break;
-    case TERRAIN_CITY:
-        /* building: wide base + narrow tower */
-        DrawRectangle(cx - s * 46 / 100, cy - s * 15 / 100,
-                      s * 92 / 100, s * 50 / 100, c);
-        DrawRectangle(cx - s * 16 / 100, cy - s * 58 / 100,
-                      s * 32 / 100, s * 43 / 100, c);
-        /* window cutout */
-        DrawRectangle(cx - s * 10 / 100, cy - s *  8 / 100,
-                      s * 20 / 100, s * 28 / 100, (Color){ 0, 0, 0, 200 });
-        break;
-    case TERRAIN_WATER:
-        /* two staggered wave bars */
-        {
-            int wh = s * 18 / 100; if (wh < 2) wh = 2;
-            int ww = s * 56 / 100; if (ww < 3) ww = 3;
-            DrawRectangle(cx - ww - ww / 4, cy - wh * 2, ww, wh, c);
-            DrawRectangle(cx + ww / 4,      cy - wh * 2, ww, wh, (Color){ c.r, c.g, c.b, 180 });
-            DrawRectangle(cx - ww,          cy,           ww, wh, c);
-            DrawRectangle(cx,               cy,           ww, wh, (Color){ c.r, c.g, c.b, 180 });
-        }
-        break;
-    default: break;
-    }
+    if (t < 0 || t >= TERRAIN_COUNT) return;
+    char letter[2] = { TERRAIN_LETTER[t], '\0' };
+    int fs = s * 2;
+    if (fs < 8) fs = 8;
+    int lw = MeasureText(letter, fs);
+    DrawText(letter, cx - lw / 2, cy - fs / 2, fs, c);
 }
 
 static void draw_map_tiles(void)
@@ -942,20 +1184,16 @@ static void draw_map_tiles(void)
             if (col == s_hero_col && row == s_hero_row) continue;
             if (s_cell_struct[row][col] >= 0) continue;
             if (s_cell_flying_dst[row][col]) continue;   /* animated tile en-route */
-            /* 4px OLED-black gap; tile = outline border + terrain icon, no fill */
             int   inset = ts / 10; if (inset < 2) inset = 2;
             int   sx = (int)((col - s_vp_vis_col) * ts) + inset;
             int   sy = (int)((row - s_vp_vis_row) * ts) + inset;
             int   tw = ts - inset * 2;
             Color c  = TERRAIN_COLOR[s_map[row][col]];
-            float bw = (float)(tw * 8 / 100); if (bw < 2.0f) bw = 2.0f;
-            DrawRectangleLinesEx(
-                (Rectangle){ (float)sx, (float)sy, (float)tw, (float)tw },
-                bw, c);
+            DrawRectangle(sx, sy, tw, tw, c);
             int icx = sx + tw / 2;
             int icy = sy + tw / 2;
             int s   = tw / 3;
-            draw_terrain_icon(icx, icy, s, s_map[row][col], c);
+            draw_terrain_icon(icx, icy, s, s_map[row][col], (Color){ 0, 0, 0, 160 });
         }
     }
 
@@ -1272,42 +1510,6 @@ static void draw_resource_strip(void)
              (Color){ 160, 160, 160, 200 });
 }
 
-/* Draw a mini flat terrain grid for legend entries. */
-/* Draw one legend tile: hollow border + terrain icon. If t == filler, ghost only. */
-static void draw_legend_tile(int tx, int ty, int cs, Terrain t, Terrain filler)
-{
-    int inset = cs / 9; if (inset < 1) inset = 1;
-    int ti    = cs - 1 - inset * 2;
-    int tcx   = tx + inset;
-    int tcy   = ty + inset;
-
-    if (t == filler) {
-        /* ghost: dim outline only to show grid slot */
-        DrawRectangleLinesEx(
-            (Rectangle){ (float)tcx, (float)tcy, (float)ti, (float)ti },
-            1.0f, (Color){ 50, 55, 70, 100 });
-        return;
-    }
-
-    Color c  = TERRAIN_COLOR[t];
-    float bw = (float)(ti * 9 / 100); if (bw < 1.5f) bw = 1.5f;
-    DrawRectangleLinesEx(
-        (Rectangle){ (float)tcx, (float)tcy, (float)ti, (float)ti },
-        bw, c);
-    int s = ti / 3; if (s >= 3)
-        draw_terrain_icon(tcx + ti / 2, tcy + ti / 2, s, t, c);
-}
-
-static void draw_legend_grid(int x, int y, int cs,
-                              const Terrain *cells, int cols, int rows,
-                              Terrain filler)
-{
-    for (int r = 0; r < rows; r++)
-        for (int c = 0; c < cols; c++)
-            draw_legend_tile(x + c * cs, y + r * cs, cs,
-                             cells[r * cols + c], filler);
-}
-
 static void draw_legend(void)
 {
     int sw = GetScreenWidth();
@@ -1316,13 +1518,13 @@ static void draw_legend(void)
     Rectangle tab    = legend_tab_rect();
     int       tab_fs = (int)(tab.height * 0.42f);
     DrawRectangleRec(tab, (Color){ 0, 0, 0, 245 });
-    DrawRectangleLinesEx(tab, 1.5f, (Color){ 70, 210, 255, 200 });
+    DrawRectangleLinesEx(tab, 1.5f, (Color){ 255, 200, 80, 200 });
 
-    const char *label = "Tile Guide";
+    const char *label = "Orders";
     int tlw = MeasureText(label, tab_fs);
     DrawText(label, (sw - tlw) / 2,
              (int)(tab.y + (tab.height - tab_fs) / 2),
-             tab_fs, (Color){ 70, 210, 255, 255 });
+             tab_fs, (Color){ 255, 200, 80, 255 });
 
     const char *arrow = s_legend_open ? "v" : "^";
     int aw = MeasureText(arrow, tab_fs);
@@ -1334,169 +1536,65 @@ static void draw_legend(void)
 
     /* --- sliding body --- */
     Rectangle dr  = legend_body_rect();
-    int       pad = (int)(dr.width * 0.04f);
+    int       pad = (int)(dr.width * 0.03f);
     DrawRectangleRec(dr, (Color){ 5, 5, 8, 248 });
-    DrawRectangleLinesEx(dr, 1.5f, (Color){ 70, 210, 255, 160 });
+    DrawRectangleLinesEx(dr, 1.5f, (Color){ 255, 200, 80, 160 });
 
     if (s_legend_t < 0.25f) return;
 
-    /* ---- diagram cell data ---- */
-    static const Terrain s_forest_cells[4] = {
-        TERRAIN_FOREST, TERRAIN_FOREST,
-        TERRAIN_FOREST, TERRAIN_FOREST,
-    };
-    static const Terrain s_farm_cells[4] = {
-        TERRAIN_PLAINS, TERRAIN_PLAINS,
-        TERRAIN_PLAINS, TERRAIN_PLAINS,
-    };
-    static const Terrain s_castle_cells[9] = {
-        TERRAIN_WATER,    TERRAIN_WATER,    TERRAIN_WATER,
-        TERRAIN_WATER,    TERRAIN_MOUNTAIN, TERRAIN_WATER,
-        TERRAIN_WATER,    TERRAIN_WATER,    TERRAIN_WATER,
-    };
-    static const Terrain s_lumber_cells[9] = {
-        TERRAIN_FOREST, TERRAIN_FOREST, TERRAIN_FOREST,
-        TERRAIN_FOREST, TERRAIN_CITY,   TERRAIN_FOREST,
-        TERRAIN_FOREST, TERRAIN_FOREST, TERRAIN_FOREST,
-    };
-    static const Terrain s_river_cells[4] = {
-        TERRAIN_WATER, TERRAIN_WATER, TERRAIN_WATER, TERRAIN_WATER,
-    };
-    static const Terrain s_wheat_cells[3] = {
-        TERRAIN_PLAINS, TERRAIN_PLAINS, TERRAIN_PLAINS,
-    };
-    static const Terrain s_road_cells[3] = {
-        TERRAIN_CITY, TERRAIN_CITY, TERRAIN_CITY,
-    };
-    static const Terrain s_quarry_cells[3] = {
-        TERRAIN_MOUNTAIN, TERRAIN_MOUNTAIN, TERRAIN_MOUNTAIN,
-    };
-    /* Forest Corner — 2×2 grid showing L (top-right is blank, use Plains as filler) */
-    static const Terrain s_fc_cells[4] = {
-        TERRAIN_FOREST, TERRAIN_PLAINS,
-        TERRAIN_FOREST, TERRAIN_FOREST,
-    };
-    /* River Bend — 2×3 grid showing L (right column bottom 2 are blank) */
-    static const Terrain s_rb_cells[6] = {
-        TERRAIN_WATER,  TERRAIN_PLAINS,
-        TERRAIN_WATER,  TERRAIN_PLAINS,
-        TERRAIN_WATER,  TERRAIN_WATER,
-    };
-    /* Crossroads — 3×3 grid showing + */
-    static const Terrain s_xr_cells[9] = {
-        TERRAIN_PLAINS, TERRAIN_CITY,   TERRAIN_PLAINS,
-        TERRAIN_CITY,   TERRAIN_CITY,   TERRAIN_CITY,
-        TERRAIN_PLAINS, TERRAIN_CITY,   TERRAIN_PLAINS,
-    };
+    int row_h = (int)(dr.height / (float)ORDER_COUNT);
 
-    /* ---- per-row metadata ---- */
-    /* g_cols, g_rows, cells ptr, name, desc, pts, per_turn */
-    static const char *s_names[12] = {
-        "Dense Forest", "Farm", "Castle", "Lumber Camp",
-        "River", "Wheat Field", "Road", "Quarry",
-        "Forest Corner", "River Bend", "Crossroads", "Trail Step"
-    };
-    static const char *s_descs[12] = {
-        "2x2 Forest", "2x2 Plains", "Mountain+Water ring", "City+Forest ring",
-        "4 Water in a line", "3 Plains in a line",
-        "3 City in a line", "3 Mountain in a line",
-        "L-shape 3x Forest", "L-shape 4x Water", "+ shape 5x City",
-        "Each step on trail"
-    };
-    static const int s_pts[12] = {
-        PT_DENSE_FOREST, PT_FARM, PT_CASTLE, PT_LUMBER_CAMP,
-        PT_RIVER, PT_WHEAT_FIELD, PT_ROAD, PT_QUARRY,
-        PT_FOREST_CORNER, PT_RIVER_BEND, PT_CROSSROADS, PT_TRAIL_STEP
-    };
-    /* g_cols and g_rows per entry */
-    static const int s_gc[12] = { 2, 2, 3, 3, 4, 3, 3, 3, 2, 2, 3, 1 };
-    static const int s_gr[12] = { 2, 2, 3, 3, 1, 1, 1, 1, 2, 3, 3, 1 };
-    /* filler terrain used as empty-slot marker in diagrams (TERRAIN_COUNT = none) */
-    static const Terrain s_filler[12] = {
-        TERRAIN_COUNT, TERRAIN_COUNT, TERRAIN_COUNT, TERRAIN_COUNT,
-        TERRAIN_COUNT, TERRAIN_COUNT, TERRAIN_COUNT, TERRAIN_COUNT,
-        TERRAIN_PLAINS, TERRAIN_PLAINS, TERRAIN_PLAINS,
-        TERRAIN_COUNT
-    };
-    const Terrain *s_cells[12] = {
-        s_forest_cells, s_farm_cells, s_castle_cells, s_lumber_cells,
-        s_river_cells, s_wheat_cells, s_road_cells, s_quarry_cells,
-        s_fc_cells, s_rb_cells, s_xr_cells, NULL
-    };
+    for (int oi = 0; oi < ORDER_COUNT; oi++) {
+        Order *ord = &s_orders[oi];
+        int    ry  = (int)dr.y + oi * row_h;
 
-    int n_rows    = 12;
-    int row_h     = (int)(dr.height / (float)n_rows);
-    int diagram_w = row_h;
-
-    for (int i = 0; i < n_rows; i++) {
-        int ry = (int)dr.y + i * row_h;
-
-        if (i > 0)
+        if (oi > 0)
             DrawLine((int)(dr.x + pad), ry,
                      (int)(dr.x + dr.width - pad), ry,
-                     (Color){ 70, 210, 255, 60 });
+                     (Color){ 255, 200, 80, 60 });
 
-        /* mini diagram */
-        if (s_cells[i] != NULL) {
-            int gc = s_gc[i], gr = s_gr[i];
-            int max_dim = gc > gr ? gc : gr;
-            int cs = diagram_w / (max_dim + 1);
-            if (cs < 4) cs = 4;
-            int gx = (int)(dr.x + pad) + (diagram_w - gc * cs) / 2;
-            int gy = ry + (row_h - gr * cs) / 2;
-            draw_legend_grid(gx, gy, cs, s_cells[i], gc, gr, s_filler[i]);
-        } else {
-            /* trail: mini hero tile */
-            int cs = diagram_w * 2 / 3;
-            int gx = (int)(dr.x + pad) + (diagram_w - cs) / 2;
-            int gy = ry + (row_h - cs) / 2;
-            /* outer glow */
-            DrawRectangleRounded(
-                (Rectangle){ (float)(gx - 2), (float)(gy - 2),
-                             (float)(cs + 4), (float)(cs + 4) },
-                0.30f, 4, (Color){ 220, 100, 255, 50 });
-            /* white hero tile */
-            DrawRectangleRounded(
-                (Rectangle){ (float)gx, (float)gy, (float)cs, (float)cs },
-                0.22f, 4, (Color){ 255, 255, 255, 255 });
-            DrawRectangleLinesEx(
-                (Rectangle){ (float)gx, (float)gy, (float)cs, (float)cs },
-                2.0f, (Color){ 220, 80, 255, 255 });
-            int hfs = cs * 50 / 100;
-            if (hfs < 6) hfs = 6;
-            int hw = MeasureText("@", hfs);
-            DrawText("@", gx + (cs - hw) / 2, gy + (cs - hfs) / 2,
-                     hfs, (Color){ 40, 0, 60, 200 });
+        /* "Order N:" prefix */
+        int label_fs = row_h * 28 / 100;
+        if (label_fs < 8) label_fs = 8;
+        char ord_label[16];
+        snprintf(ord_label, sizeof(ord_label), "Order %d:", oi + 1);
+        DrawText(ord_label, (int)(dr.x + pad),
+                 ry + (row_h - label_fs) / 2,
+                 label_fs, (Color){ 200, 200, 200, 200 });
+        int lw = MeasureText(ord_label, label_fs);
+        int x  = (int)(dr.x + pad + lw + pad);
+
+        /* requirement badges: [coloured square with letter] x N */
+        int badge_h  = row_h * 65 / 100; if (badge_h < 8) badge_h = 8;
+        int badge_fs = badge_h * 60 / 100; if (badge_fs < 6) badge_fs = 6;
+        int count_fs = label_fs;
+        int plus_fs  = label_fs;
+
+        for (int ri = 0; ri < ord->req_count; ri++) {
+            if (ri > 0) {
+                DrawText("+", x + 4, ry + (row_h - plus_fs) / 2,
+                         plus_fs, (Color){ 180, 180, 180, 200 });
+                x += MeasureText("+", plus_fs) + 8;
+            }
+
+            Terrain t  = ord->terrain[ri];
+            Color   tc = TERRAIN_COLOR[t];
+            int     by = ry + (row_h - badge_h) / 2;
+
+            DrawRectangle(x, by, badge_h, badge_h, tc);
+            char tl[2] = { TERRAIN_LETTER[t], '\0' };
+            int  tfw   = MeasureText(tl, badge_fs);
+            DrawText(tl, x + (badge_h - tfw) / 2,
+                     by + (badge_h - badge_fs) / 2,
+                     badge_fs, (Color){ 0, 0, 0, 200 });
+            x += badge_h + 2;
+
+            char cnt[8];
+            snprintf(cnt, sizeof(cnt), "x%d", ord->min_size[ri]);
+            DrawText(cnt, x, ry + (row_h - count_fs) / 2,
+                     count_fs, (Color){ 255, 255, 255, 220 });
+            x += MeasureText(cnt, count_fs) + 4;
         }
-
-        /* name + description */
-        int text_x  = (int)(dr.x + pad + diagram_w + pad);
-        int name_fs = row_h * 30 / 100;
-        int desc_fs = row_h * 22 / 100;
-        if (name_fs < 10) name_fs = 10;
-        if (desc_fs <  8) desc_fs =  8;
-
-        DrawText(s_names[i], text_x,
-                 ry + (row_h / 2 - name_fs) / 2,
-                 name_fs, (Color){ 255, 255, 255, 245 });
-        DrawText(s_descs[i], text_x,
-                 ry + row_h / 2,
-                 desc_fs, (Color){ 150, 200, 220, 200 });
-
-        /* pts label right-aligned */
-        char pts_buf[24];
-        snprintf(pts_buf, sizeof(pts_buf),
-                 (i < 11) ? "+%d/turn" : "+%d/step", s_pts[i]);
-        int   pts_fs = name_fs;
-        int   pts_w  = MeasureText(pts_buf, pts_fs);
-        Color pts_c  = (s_pts[i] >= PT_CASTLE)      ? (Color){ 255, 215,  60, 255 }
-                     : (s_pts[i] >= PT_LUMBER_CAMP)  ? (Color){ 160, 240, 140, 255 }
-                     : (s_pts[i] >= PT_DENSE_FOREST) ? (Color){ 100, 220, 130, 255 }
-                     :                                  (Color){ 180, 200, 220, 230 };
-        DrawText(pts_buf,
-                 (int)(dr.x + dr.width - pad - pts_w),
-                 ry + (row_h - pts_fs) / 2,
-                 pts_fs, pts_c);
     }
 }
 
@@ -1533,9 +1631,10 @@ static void RealmWalkInit(void)
     memset(s_trail_age, 0, sizeof(s_trail_age));
 
     /* scoring state */
-    s_score      = 0;
-    s_turn_count = 0;
-    s_game_over  = false;
+    s_score         = 0;
+    s_turn_count    = 0;
+    s_pending_moves = 0;
+    s_game_over     = false;
     for (int _pi = 0; _pi < MAX_SCORE_POPUPS; _pi++)
         s_popups[_pi].active = false;
 
@@ -1560,7 +1659,11 @@ static void RealmWalkInit(void)
     s_prev_tc       = 0;
     s_prev_touch    = (Vector2){ -1.0f, -1.0f };
 
-    /* No structures pre-exist at game start; detection happens at turn-end. */
+    /* seed initial orders */
+    for (int i = 0; i < ORDER_COUNT; i++)
+        s_orders[i] = generate_order();
+    s_group_count = 0;
+    memset(s_group_map, -1, sizeof(s_group_map));
 }
 
 static void RealmWalkUpdate(float dt)
@@ -1659,6 +1762,29 @@ static void RealmWalkUpdate(float dt)
     }
 }
 
+static void draw_cashin_btn(void)
+{
+    Rectangle r    = cashin_btn_rect();
+    bool active    = (s_pending_moves > 0) && (s_phase == PHASE_IDLE);
+    Color bg       = active ? (Color){ 220, 170, 40, 230 } : (Color){ 80, 80, 80, 180 };
+    Color border   = active ? (Color){ 255, 220, 80, 255 } : (Color){ 120, 120, 120, 200 };
+    Color text_col = active ? (Color){ 0, 0, 0, 255 }     : (Color){ 160, 160, 160, 200 };
+
+    DrawRectangleRounded(r, 0.25f, 6, bg);
+    DrawRectangleLinesEx(r, 2.0f, border);
+
+    char label[32];
+    snprintf(label, sizeof(label), "Cash In (%d)", s_pending_moves);
+    int sh = GetScreenHeight();
+    int fs = sh * 4 / 100;
+    if (fs < 10) fs = 10;
+    int lw = MeasureText(label, fs);
+    DrawText(label,
+             (int)(r.x + (r.width  - lw) / 2),
+             (int)(r.y + (r.height - fs) / 2),
+             fs, text_col);
+}
+
 static void draw_score_popups(void)
 {
     int ts = tile_px();
@@ -1731,6 +1857,7 @@ static void RealmWalkDraw(void)
     draw_score_popups();
     draw_resource_strip();
     draw_timer_bar();
+    draw_cashin_btn();
     draw_legend();
     draw_end_game();
 }
