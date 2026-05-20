@@ -6,6 +6,7 @@
 #include "../prototypes/drag_disp/drag_disp.h"
 #include "../prototypes/triad/triad.h"
 #include "../prototypes/realm-walk/realm_walk.h"
+#include "../prototypes/pool/pool.h"
 
 #ifdef PLATFORM_WEB
 #include <emscripten/emscripten.h>
@@ -18,6 +19,7 @@
 /* ---------------------------------------------------------------- registry
  * To add a prototype: #include its header above, add &XxxProto below. */
 static const Prototype * const PROTOTYPES[] = {
+    &PoolProto,
     &BallsProto,
     &DragDispProto,
     &TriadProto,
