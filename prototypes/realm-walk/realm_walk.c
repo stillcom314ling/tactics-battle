@@ -9,7 +9,8 @@
 
 #define MAP_COLS        30
 #define MAP_ROWS        20
-#define SCROLL_DEAD_ZONE 2      /* hero cells from vp center before scroll */
+#define VIEW_COLS        6      /* fixed visible columns                   */
+#define VIEW_ROWS        8      /* fixed visible rows                      */
 #define TURN_SECS        3.5f
 #define MAX_TRAIL       (MAP_COLS + MAP_ROWS)
 #define MOVE_COOLDOWN    0.12f  /* seconds between hero steps while dragging */
@@ -204,20 +205,67 @@ static const char *STRUCT_LABEL[STRUCT_TYPE_COUNT] = {
 
 /* ---------------------------------------------------------- layout helpers */
 
-static int tile_px(void)
+static int nav_btn_size(void)
 {
-    int t = GetScreenWidth() / 8;
-    return (t < 40) ? 40 : t;
+    int sh = GetScreenHeight();
+    int s  = sh / 14;
+    return s < 44 ? 44 : s;
 }
 
-static int vis_cols(void) { return GetScreenWidth()  / tile_px() + 1; }
-static int vis_rows(void) { return GetScreenHeight() / tile_px() + 1; }
+static int tile_px(void)
+{
+    int sw     = GetScreenWidth();
+    int sh     = GetScreenHeight();
+    int hud_h  = sh * 6 / 100;
+    int leg_h  = sh * 7 / 100;
+    int nav_h  = nav_btn_size();
+    int gap    = nav_h / 6;
+    int avail_h = sh - hud_h - leg_h - nav_h - gap * 3;
+    if (avail_h < 1) avail_h = 1;
+    int t_w = sw / VIEW_COLS;
+    int t_h = avail_h / VIEW_ROWS;
+    int t   = t_w < t_h ? t_w : t_h;
+    return t > 0 ? t : 1;
+}
+
+static int grid_x(void)
+{
+    int sw = GetScreenWidth();
+    int gw = VIEW_COLS * tile_px();
+    return (sw - gw) / 2;
+}
+
+static int grid_y(void)
+{
+    int sh    = GetScreenHeight();
+    int hud_h = sh * 6 / 100;
+    int leg_h = sh * 7 / 100;
+    int nav_h = nav_btn_size();
+    int gap   = nav_h / 6;
+    int gh    = VIEW_ROWS * tile_px();
+    int avail = sh - hud_h - leg_h - nav_h - gap * 3;
+    if (avail < 0) avail = 0;
+    return hud_h + gap + (avail - gh) / 2;
+}
+
+static int vis_cols(void) { return VIEW_COLS; }
+static int vis_rows(void) { return VIEW_ROWS; }
 
 static bool screen_to_tile(Vector2 p, int *out_col, int *out_row)
 {
     int ts  = tile_px();
-    int col = s_vp_col + (int)(p.x / (float)ts);
-    int row = s_vp_row + (int)(p.y / (float)ts);
+    int gx  = grid_x();
+    int gy  = grid_y();
+    float lx = p.x - (float)gx;
+    float ly = p.y - (float)gy;
+    if (lx < 0.0f || ly < 0.0f) { *out_col = -1; *out_row = -1; return false; }
+    int col = s_vp_col + (int)(lx / (float)ts);
+    int row = s_vp_row + (int)(ly / (float)ts);
+    if (col < s_vp_col || col >= s_vp_col + VIEW_COLS ||
+        row < s_vp_row || row >= s_vp_row + VIEW_ROWS) {
+        *out_col = -1; *out_row = -1;
+        return false;
+    }
     if (col < 0 || col >= MAP_COLS || row < 0 || row >= MAP_ROWS) {
         *out_col = -1; *out_row = -1;
         return false;
@@ -231,9 +279,38 @@ static Vector2 tile_center_screen(int map_col, int map_row)
 {
     int ts = tile_px();
     return (Vector2){
-        (float)((map_col - s_vp_col) * ts + ts / 2),
-        (float)((map_row - s_vp_row) * ts + ts / 2),
+        (float)((map_col - s_vp_col) * ts + ts / 2 + grid_x()),
+        (float)((map_row - s_vp_row) * ts + ts / 2 + grid_y()),
     };
+}
+
+/* Nav button geometry: row of 4 buttons (<, ^, v, >) above the legend tab. */
+static Rectangle nav_btn_rect(int idx)
+{
+    int sw    = GetScreenWidth();
+    int sh    = GetScreenHeight();
+    int leg_h = sh * 7 / 100;
+    int s     = nav_btn_size();
+    int gap   = s / 6;
+    int total = s * 4 + gap * 3;
+    int x     = (sw - total) / 2;
+    int y     = sh - leg_h - gap - s;
+    return (Rectangle){ (float)(x + idx * (s + gap)), (float)y, (float)s, (float)s };
+}
+
+static int touch_nav_btn(Vector2 pos)
+{
+    for (int i = 0; i < 4; i++)
+        if (CheckCollisionPointRec(pos, nav_btn_rect(i))) return i;
+    return -1;
+}
+
+static void clamp_viewport(void)
+{
+    if (s_vp_col < 0) s_vp_col = 0;
+    if (s_vp_col + VIEW_COLS > MAP_COLS) s_vp_col = MAP_COLS - VIEW_COLS;
+    if (s_vp_row < 0) s_vp_row = 0;
+    if (s_vp_row + VIEW_ROWS > MAP_ROWS) s_vp_row = MAP_ROWS - VIEW_ROWS;
 }
 
 /* HUD tab: compact strip pinned to the top of the screen */
@@ -297,24 +374,18 @@ static bool check_scroll_trigger(void)
     int old_vp_col = s_vp_col;
     int old_vp_row = s_vp_row;
 
-    /* Scroll when hero strays more than SCROLL_DEAD_ZONE cells from
-       the viewport centre.  Moving by 1 cell puts the hero back inside
-       the dead zone, which prevents the old edge-cascade problem. */
-    int center_col = s_vp_col + vc / 2;
-    int center_row = s_vp_row + vr / 2;
-    int off_col = s_hero_col - center_col;
-    int off_row = s_hero_row - center_row;
+    /* Keep the hero on-screen: pan only when it lands on (or past) an edge of
+       the fixed 6x8 viewport. Manual nav buttons handle all other panning. */
+    int rel_col = s_hero_col - s_vp_col;
+    int rel_row = s_hero_row - s_vp_row;
 
-    if (off_col > SCROLL_DEAD_ZONE)       s_vp_col++;
-    else if (off_col < -SCROLL_DEAD_ZONE) s_vp_col--;
+    if (rel_col >= vc - 1) s_vp_col++;
+    else if (rel_col <= 0) s_vp_col--;
 
-    if (off_row > SCROLL_DEAD_ZONE)       s_vp_row++;
-    else if (off_row < -SCROLL_DEAD_ZONE) s_vp_row--;
+    if (rel_row >= vr - 1) s_vp_row++;
+    else if (rel_row <= 0) s_vp_row--;
 
-    if (s_vp_col < 0)              s_vp_col = 0;
-    if (s_vp_col + vc > MAP_COLS)  s_vp_col = MAP_COLS - vc;
-    if (s_vp_row < 0)              s_vp_row = 0;
-    if (s_vp_row + vr > MAP_ROWS)  s_vp_row = MAP_ROWS - vr;
+    clamp_viewport();
 
     return (s_vp_col != old_vp_col || s_vp_row != old_vp_row);
 }
@@ -848,6 +919,17 @@ static void on_up(Vector2 pos)
         return;
     }
 
+    /* Nav buttons pan the viewport one tile in their direction. */
+    int btn = touch_nav_btn(pos);
+    if (btn >= 0) {
+        if      (btn == 0) s_vp_col--;
+        else if (btn == 1) s_vp_row--;
+        else if (btn == 2) s_vp_row++;
+        else if (btn == 3) s_vp_col++;
+        clamp_viewport();
+        return;
+    }
+
     /* legend tab toggle */
     if (CheckCollisionPointRec(pos, legend_tab_rect())) {
         s_legend_open = !s_legend_open;
@@ -931,6 +1013,10 @@ static void draw_map_tiles(void)
     int ts = tile_px();
     int vc = vis_cols();
     int vr = vis_rows();
+    int gx = grid_x();
+    int gy = grid_y();
+
+    BeginScissorMode(gx, gy, vc * ts, vr * ts);
 
     /* Pass 1: draw individual terrain tiles (skip cells that belong to a
      * structure — those are rendered as one large tile in pass 2).
@@ -944,8 +1030,8 @@ static void draw_map_tiles(void)
             if (s_cell_flying_dst[row][col]) continue;   /* animated tile en-route */
             /* 4px OLED-black gap; tile = outline border + terrain icon, no fill */
             int   inset = ts / 10; if (inset < 2) inset = 2;
-            int   sx = (int)((col - s_vp_vis_col) * ts) + inset;
-            int   sy = (int)((row - s_vp_vis_row) * ts) + inset;
+            int   sx = (int)((col - s_vp_vis_col) * ts) + inset + gx;
+            int   sy = (int)((row - s_vp_vis_row) * ts) + inset + gy;
             int   tw = ts - inset * 2;
             Color c  = TERRAIN_COLOR[s_map[row][col]];
             float bw = (float)(tw * 8 / 100); if (bw < 2.0f) bw = 2.0f;
@@ -971,8 +1057,8 @@ static void draw_map_tiles(void)
         int tw    = ts - inset * 2;
         Terrain st = STRUCT_TERRAIN[s->type];
         for (int ci = 0; ci < s->cell_count; ci++) {
-            int ox = (int)((s->col + s->cell_dc[ci] - s_vp_vis_col) * ts) + inset;
-            int oy = (int)((s->row + s->cell_dr[ci] - s_vp_vis_row) * ts) + inset;
+            int ox = (int)((s->col + s->cell_dc[ci] - s_vp_vis_col) * ts) + inset + gx;
+            int oy = (int)((s->row + s->cell_dr[ci] - s_vp_vis_row) * ts) + inset + gy;
             /* faint outer glow */
             DrawRectangleRounded(
                 (Rectangle){ (float)(ox - 3), (float)(oy - 3),
@@ -989,8 +1075,8 @@ static void draw_map_tiles(void)
         }
 
         /* Label centered on bounding box */
-        int sx = (int)((s->col - s_vp_vis_col) * ts);
-        int sy = (int)((s->row - s_vp_vis_row) * ts);
+        int sx = (int)((s->col - s_vp_vis_col) * ts) + gx;
+        int sy = (int)((s->row - s_vp_vis_row) * ts) + gy;
         int bw = s->w * ts - 1;
         int bh = s->h * ts - 1;
         const char *label = STRUCT_LABEL[s->type];
@@ -1002,20 +1088,25 @@ static void draw_map_tiles(void)
         DrawText(label, sx + (bw - lw) / 2, sy + (bh - fs) / 2,
                  fs, (Color){ 255, 255, 255, 235 });
     }
+
+    EndScissorMode();
 }
 
 static void draw_trail(void)
 {
     if (!s_is_dragging || s_trail_len == 0) return;
     int ts = tile_px();
+    int gx = grid_x();
+    int gy = grid_y();
+    BeginScissorMode(gx, gy, VIEW_COLS * ts, VIEW_ROWS * ts);
     for (int i = 0; i < s_trail_len; i++) {
         int col = s_trail_col[i];
         int row = s_trail_row[i];
         /* cull using logical vp with ±1 buffer to handle pan lag */
         if (col < s_vp_col - 1 || col >= s_vp_col + vis_cols() + 1) continue;
         if (row < s_vp_row - 1 || row >= s_vp_row + vis_rows() + 1) continue;
-        int sx = (int)((col - s_vp_vis_col) * ts);
-        int sy = (int)((row - s_vp_vis_row) * ts);
+        int sx = (int)((col - s_vp_vis_col) * ts) + gx;
+        int sy = (int)((row - s_vp_vis_row) * ts) + gy;
 
         /* gradient: i=0 oldest (dim), i=trail_len-1 newest (bright) */
         float gradient_t = (s_trail_len > 1)
@@ -1044,6 +1135,7 @@ static void draw_trail(void)
                 bw, (Color){ 255, 255, 255, (unsigned char)(alpha * 3 / 4) });
         }
     }
+    EndScissorMode();
 }
 
 static void draw_scan_flash(void)
@@ -1059,14 +1151,17 @@ static void draw_scan_flash(void)
     int ts = tile_px();
     int vc = vis_cols();
     int vr = vis_rows();
+    int gx = grid_x();
+    int gy = grid_y();
 
+    BeginScissorMode(gx, gy, vc * ts, vr * ts);
     for (int i = 0; i < s_flash_count; i++) {
         int col = s_flash_col[i];
         int row = s_flash_row[i];
         if (col < s_vp_col || col >= s_vp_col + vc) continue;
         if (row < s_vp_row || row >= s_vp_row + vr) continue;
-        int sx = (int)((col - s_vp_vis_col) * ts);
-        int sy = (int)((row - s_vp_vis_row) * ts);
+        int sx = (int)((col - s_vp_vis_col) * ts) + gx;
+        int sy = (int)((row - s_vp_vis_row) * ts) + gy;
         /* bright white flash over the replaced tile */
         DrawRectangle(sx, sy, ts - 1, ts - 1, (Color){ 255, 255, 200, a });
         /* sparkle border */
@@ -1074,18 +1169,23 @@ static void draw_scan_flash(void)
             (Rectangle){ (float)sx, (float)sy, (float)(ts - 1), (float)(ts - 1) },
             2.0f, (Color){ 255, 220, 60, (unsigned char)(a * 0.8f) });
     }
+    EndScissorMode();
 }
 
 static void draw_flying_tiles(void)
 {
     int ts = tile_px();
-    int sw = GetScreenWidth(), sh = GetScreenHeight();
+    int gx = grid_x();
+    int gy = grid_y();
+    int gw = VIEW_COLS * ts;
+    int gh = VIEW_ROWS * ts;
+    BeginScissorMode(gx, gy, gw, gh);
     for (int _fi = 0; _fi < MAX_FLYING_TILES; _fi++) {
         FlyingTile *ft = &s_flying[_fi];
         if (!ft->active) continue;
-        int sx = (int)((ft->vis_col - s_vp_vis_col) * ts);
-        int sy = (int)((ft->vis_row - s_vp_vis_row) * ts);
-        if (sx + ts < 0 || sx > sw || sy + ts < 0 || sy > sh) continue;
+        int sx = (int)((ft->vis_col - s_vp_vis_col) * ts) + gx;
+        int sy = (int)((ft->vis_row - s_vp_vis_row) * ts) + gy;
+        if (sx + ts < gx || sx > gx + gw || sy + ts < gy || sy > gy + gh) continue;
         int   inset = ts / 10; if (inset < 2) inset = 2;
         int   tw = ts - inset * 2;
         int   ox = sx + inset, oy = sy + inset;
@@ -1100,16 +1200,21 @@ static void draw_flying_tiles(void)
             bw, tc);
         draw_terrain_icon(ox + tw / 2, oy + tw / 2, tw / 3, ft->terrain, tc);
     }
+    EndScissorMode();
 }
 
 static void draw_hero(void)
 {
     int   ts    = tile_px();
+    int   gx    = grid_x();
+    int   gy    = grid_y();
     float scale = 1.0f + s_hero_bump;
 
+    BeginScissorMode(gx, gy, VIEW_COLS * ts, VIEW_ROWS * ts);
+
     /* visual float position → pixel center */
-    float cx = (s_hero_vis_col - s_vp_vis_col) * ts + ts * 0.5f;
-    float cy = (s_hero_vis_row - s_vp_vis_row) * ts + ts * 0.5f;
+    float cx = (s_hero_vis_col - s_vp_vis_col) * ts + ts * 0.5f + gx;
+    float cy = (s_hero_vis_row - s_vp_vis_row) * ts + ts * 0.5f + gy;
 
     /* scaled tile dimensions, centered on cx/cy */
     float w  = (ts - 1) * scale;
@@ -1133,6 +1238,8 @@ static void draw_hero(void)
     int  lw = MeasureText("@", fs);
     DrawText("@", (int)(cx - lw * 0.5f), (int)(cy - fs * 0.5f),
              fs, (Color){ 40, 0, 60, 220 });
+
+    EndScissorMode();
 }
 
 static void draw_timer_bar(void)
@@ -1306,6 +1413,50 @@ static void draw_legend_grid(int x, int y, int cs,
         for (int c = 0; c < cols; c++)
             draw_legend_tile(x + c * cs, y + r * cs, cs,
                              cells[r * cols + c], filler);
+}
+
+static void draw_nav_buttons(void)
+{
+    static const char *labels[4] = { "<", "^", "v", ">" };
+    bool can_enable[4];
+    can_enable[0] = (s_vp_col > 0);
+    can_enable[1] = (s_vp_row > 0);
+    can_enable[2] = (s_vp_row + VIEW_ROWS < MAP_ROWS);
+    can_enable[3] = (s_vp_col + VIEW_COLS < MAP_COLS);
+
+    Vector2 mp        = GetMousePosition();
+    bool    mouse_dn  = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+    int     touch_n   = GetTouchPointCount();
+    Vector2 tp        = (touch_n > 0) ? GetTouchPosition(0) : (Vector2){ -1.0f, -1.0f };
+
+    for (int i = 0; i < 4; i++) {
+        Rectangle r = nav_btn_rect(i);
+
+        bool hover = CheckCollisionPointRec(mp, r);
+        bool press = (mouse_dn && hover) ||
+                     (touch_n > 0 && CheckCollisionPointRec(tp, r));
+
+        Color fill = can_enable[i]
+                       ? (press ? (Color){ 60, 30, 70, 250 }
+                                : (Color){ 20, 20, 28, 240 })
+                       : (Color){ 12, 12, 16, 200 };
+        Color edge = can_enable[i]
+                       ? (Color){ 220, 80, 255, 220 }
+                       : (Color){ 80, 60, 100, 120 };
+        Color text = can_enable[i]
+                       ? (Color){ 240, 240, 250, 250 }
+                       : (Color){ 110, 110, 130, 180 };
+
+        DrawRectangleRounded(r, 0.28f, 6, fill);
+        DrawRectangleLinesEx(r, 2.0f, edge);
+
+        int fs = (int)(r.height * 0.55f);
+        int lw = MeasureText(labels[i], fs);
+        DrawText(labels[i],
+                 (int)(r.x + (r.width  - lw) / 2),
+                 (int)(r.y + (r.height - fs) / 2),
+                 fs, text);
+    }
 }
 
 static void draw_legend(void)
@@ -1662,6 +1813,9 @@ static void RealmWalkUpdate(float dt)
 static void draw_score_popups(void)
 {
     int ts = tile_px();
+    int gx = grid_x();
+    int gy = grid_y();
+    BeginScissorMode(gx, gy, VIEW_COLS * ts, VIEW_ROWS * ts);
     for (int _pi = 0; _pi < MAX_SCORE_POPUPS; _pi++) {
         ScorePopup *p = &s_popups[_pi];
         if (!p->active) continue;
@@ -1671,8 +1825,8 @@ static void draw_score_popups(void)
         float alpha = (1.0f - t) * (1.0f - t);
         unsigned char a = (unsigned char)(alpha * 255.0f);
 
-        float cx = (p->tile_col - s_vp_vis_col) * ts;
-        float cy = (p->tile_row - s_vp_vis_row) * ts;
+        float cx = (p->tile_col - s_vp_vis_col) * ts + gx;
+        float cy = (p->tile_row - s_vp_vis_row) * ts + gy;
 
         char buf[16];
         snprintf(buf, sizeof(buf), "+%d", p->value);
@@ -1690,6 +1844,7 @@ static void draw_score_popups(void)
         DrawText(buf, (int)cx - lw / 2, (int)cy, fs,
                  (Color){ 255, 230, 60, a });
     }
+    EndScissorMode();
 }
 
 static void draw_end_game(void)
@@ -1729,6 +1884,7 @@ static void RealmWalkDraw(void)
     draw_flying_tiles();
     draw_hero();
     draw_score_popups();
+    draw_nav_buttons();
     draw_resource_strip();
     draw_timer_bar();
     draw_legend();
