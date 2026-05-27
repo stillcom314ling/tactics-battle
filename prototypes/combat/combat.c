@@ -20,6 +20,8 @@
 #define BETWEEN_SEC       0.4f
 
 #define UNIT_LERP_SPD     16.0f
+#define HELD_LERP_MULT    2.5f
+#define MOVE_COOLDOWN     0.10f    /* seconds between step-swaps while dragging */
 #define LIFT_PX_FRAC      8       /* picked ally rises by tile/LIFT_PX_FRAC */
 
 /* class HP / damage */
@@ -75,6 +77,9 @@ static int     s_drag_dc;
 static int     s_drag_dr;
 static int     s_pickup_col;
 static int     s_pickup_row;
+static float   s_move_cd;          /* time until next step-swap allowed */
+static Vector2 s_finger_pos;       /* live input position while dragging */
+static bool    s_finger_valid;
 
 static Pending s_pending[MAX_UNITS];
 
@@ -447,6 +452,9 @@ static void spawn_popup(float x, float y, int amount)
 
 static void resolve_turn(void)
 {
+    /* drop the held visual so the picked ally lerps back to its cell */
+    s_finger_valid = false;
+
     /* run pending recompute one more time to capture final state */
     recompute_pending();
 
@@ -478,9 +486,11 @@ static void resolve_turn(void)
 
 static void start_plan_phase(void)
 {
-    s_picked_idx = -1;
-    s_drag_dc    = 0;
-    s_drag_dr    = -1;
+    s_picked_idx   = -1;
+    s_drag_dc      = 0;
+    s_drag_dr      = -1;
+    s_move_cd      = 0.0f;
+    s_finger_valid = false;
     memset(s_trail, 0, sizeof(s_trail));
     s_phase = PHASE_PLAN;
     s_phase_t = TURN_TIMER_SEC;
@@ -498,45 +508,64 @@ static void on_down(Vector2 pos)
     if (!screen_to_cell(pos, &c, &r)) return;
     int u = unit_at(c, r);
     if (u < 0 || s_units[u].side != SIDE_ALLY) return;
-    s_picked_idx = u;
-    s_pickup_col = c;
-    s_pickup_row = r;
-    s_drag_dc    = 0;
-    s_drag_dr    = -1;
+    s_picked_idx   = u;
+    s_pickup_col   = c;
+    s_pickup_row   = r;
+    s_drag_dc      = 0;
+    s_drag_dr      = -1;
+    s_move_cd      = 0.0f;
+    s_finger_pos   = pos;
+    s_finger_valid = true;
     memset(s_trail, 0, sizeof(s_trail));
     s_trail[r][c] = true;
     recompute_pending();
 }
 
+/* One step of the drag.  Pattern from realm-walk's on_move: instead of
+ * requiring the finger to land on an orthogonally adjacent cell, we
+ * compute the vector from the picked unit to the cursor cell and step
+ * ONE cell along the dominant axis.  Repeated calls (gated by a short
+ * cooldown) walk the unit toward the finger, pulling displaced allies
+ * back into the vacated tile each step.  Enemy tiles stop the chase. */
 static void on_move(Vector2 pos)
 {
     if (s_phase != PHASE_PLAN) return;
     if (s_picked_idx < 0) return;
+
+    /* keep visual snapped to finger regardless of cooldown */
+    s_finger_pos   = pos;
+    s_finger_valid = true;
+
+    if (s_move_cd > 0.0f) return;
+
     int c, r;
     if (!screen_to_cell(pos, &c, &r)) return;
+
     int pc = s_units[s_picked_idx].col;
     int pr = s_units[s_picked_idx].row;
-    if (c == pc && r == pr) return;
-
-    /* only orthogonal-adjacent steps */
     int dc = c - pc, dr = r - pr;
+    if (dc == 0 && dr == 0) return;
+
+    int step_col = pc;
+    int step_row = pr;
     int adc = dc < 0 ? -dc : dc;
     int adr = dr < 0 ? -dr : dr;
-    if (adc + adr != 1) return;
+    if (adc >= adr) step_col += (dc > 0) ? 1 : -1;
+    else            step_row += (dr > 0) ? 1 : -1;
 
-    int u = unit_at(c, r);
+    int u = unit_at(step_col, step_row);
     if (u >= 0 && s_units[u].side == SIDE_ENEMY) return; /* blocked */
 
-    /* swap */
     if (u >= 0) {
         s_units[u].col = pc;
         s_units[u].row = pr;
     }
-    s_units[s_picked_idx].col = c;
-    s_units[s_picked_idx].row = r;
-    s_drag_dc = dc;
-    s_drag_dr = dr;
-    s_trail[r][c] = true;
+    s_units[s_picked_idx].col = step_col;
+    s_units[s_picked_idx].row = step_row;
+    s_drag_dc = step_col - pc;
+    s_drag_dr = step_row - pr;
+    s_trail[step_row][step_col] = true;
+    s_move_cd = MOVE_COOLDOWN;
 
     recompute_pending();
 }
@@ -546,6 +575,7 @@ static void on_up(Vector2 pos)
     (void)pos;
     if (s_phase != PHASE_PLAN) return;
     if (s_picked_idx < 0) return;     /* stray tap on empty tile — ignore */
+    s_finger_valid = false;
     resolve_turn();
 }
 
@@ -580,6 +610,9 @@ static void CombatInit(void)
     s_prev_tc = 0;
     s_prev_touch = (Vector2){ -1.0f, -1.0f };
     s_mouse_was_down = false;
+    s_move_cd = 0.0f;
+    s_finger_valid = false;
+    s_finger_pos = (Vector2){ -1.0f, -1.0f };
     start_plan_phase();
 }
 
@@ -605,6 +638,7 @@ static void CombatUpdate(float dt)
 
     /* phase timers */
     if (s_phase == PHASE_PLAN) {
+        if (s_move_cd > 0.0f) s_move_cd -= dt;
         /* timer only runs while an ally is picked up — planning is untimed */
         if (s_picked_idx >= 0) {
             s_phase_t -= dt;
@@ -621,11 +655,24 @@ static void CombatUpdate(float dt)
         if (s_phase_t <= 0.0f) start_plan_phase();
     }
 
-    /* unit position lerp */
-    float k = fminf(UNIT_LERP_SPD * dt, 1.0f);
+    /* unit position lerp.  Picked unit chases the finger (drag_disp-style);
+     * everyone else lerps to their logical cell. */
+    float k_norm = fminf(UNIT_LERP_SPD * dt, 1.0f);
+    float k_held = fminf(UNIT_LERP_SPD * HELD_LERP_MULT * dt, 1.0f);
     for (int i = 0; i < s_unit_count; i++) {
-        s_units[i].vx += ((float)s_units[i].col - s_units[i].vx) * k;
-        s_units[i].vy += ((float)s_units[i].row - s_units[i].vy) * k;
+        float tx = (float)s_units[i].col;
+        float ty = (float)s_units[i].row;
+        float k  = k_norm;
+        if (i == s_picked_idx && s_finger_valid) {
+            int ts = tile_px();
+            if (ts > 0) {
+                tx = (s_finger_pos.x - (float)grid_x()) / (float)ts - 0.5f;
+                ty = (s_finger_pos.y - (float)grid_y()) / (float)ts - 0.5f;
+            }
+            k = k_held;
+        }
+        s_units[i].vx += (tx - s_units[i].vx) * k;
+        s_units[i].vy += (ty - s_units[i].vy) * k;
         if (s_units[i].flash_t > 0.0f) {
             s_units[i].flash_t -= dt;
             if (s_units[i].flash_t < 0.0f) s_units[i].flash_t = 0.0f;
