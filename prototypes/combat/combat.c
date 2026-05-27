@@ -605,10 +605,13 @@ static void CombatUpdate(float dt)
 
     /* phase timers */
     if (s_phase == PHASE_PLAN) {
-        s_phase_t -= dt;
-        if (s_phase_t <= 0.0f) {
-            s_phase_t = 0.0f;
-            resolve_turn();
+        /* timer only runs while an ally is picked up — planning is untimed */
+        if (s_picked_idx >= 0) {
+            s_phase_t -= dt;
+            if (s_phase_t <= 0.0f) {
+                s_phase_t = 0.0f;
+                resolve_turn();
+            }
         }
     } else if (s_phase == PHASE_RESOLVE) {
         s_phase_t -= dt;
@@ -891,8 +894,11 @@ static void draw_hud_bot(void)
 
     int fs = bar_h * 70 / 100;
     if (fs < 12) fs = 12;
-    char buf[24];
-    if (s_phase == PHASE_PLAN)        snprintf(buf, sizeof(buf), "%.1fs", s_phase_t);
+    char buf[32];
+    if (s_phase == PHASE_PLAN) {
+        if (s_picked_idx >= 0)  snprintf(buf, sizeof(buf), "%.1fs", s_phase_t);
+        else                    snprintf(buf, sizeof(buf), "pick up an ally");
+    }
     else if (s_phase == PHASE_RESOLVE) snprintf(buf, sizeof(buf), "RESOLVE");
     else if (s_phase == PHASE_BETWEEN) snprintf(buf, sizeof(buf), "...");
     else if (s_phase == PHASE_WIN)     snprintf(buf, sizeof(buf), "VICTORY");
