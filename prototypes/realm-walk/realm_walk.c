@@ -178,33 +178,41 @@ static int        s_turn_count;
 static bool       s_game_over;
 static ScorePopup s_popups[MAX_SCORE_POPUPS];
 
-/* ---- tactical unit state (single instance of each kind for now) ---- */
-static bool  s_player_alive;
-static int   s_player_tele_dc, s_player_tele_dr;
+/* ---- tactical unit state (multiple units per kind) ---- */
+typedef struct {
+    UnitKind kind;
+    bool     alive;
+    int      col, row;
+    int      tele_dc, tele_dr;
+    float    vis_col, vis_row;
+    float    bump;
+} Unit;
 
-static bool  s_enemy_alive;
-static int   s_enemy_col, s_enemy_row;
-static float s_enemy_vis_col, s_enemy_vis_row;
-static float s_enemy_bump;
-static int   s_enemy_tele_dc, s_enemy_tele_dr;
+#define MAX_UNITS 32
+static Unit s_units[MAX_UNITS];
+static int  s_unit_count;
+static int  s_active_player_idx;  /* -1 = none being dragged */
 
-static bool  s_protected_alive;
-static int   s_protected_col, s_protected_row;
-static float s_protected_vis_col, s_protected_vis_row;
+/* Legacy mirror of the active player's logical position. Kept in sync
+ * during drag so check_scroll_trigger and a few other helpers continue
+ * to work without churn. */
+/* (s_hero_col/s_hero_row remain declared above.) */
 
 static bool  s_player_won;
 static bool  s_player_lost;
 static float s_resolve_flash;     /* counts down to flash attack hits   */
 #define RESOLVE_FLASH_SECS 0.45f
 
-/* Latest resolved attack targets (for the post-drag flash). col=-1 = none. */
-static int   s_last_player_atk_col, s_last_player_atk_row;
-static int   s_last_enemy_atk_col,  s_last_enemy_atk_row;
+/* Latest resolved attack targets (for the post-drag flash). */
+typedef struct { int col, row; bool by_player; } AttackHit;
+#define MAX_ATTACKS MAX_UNITS
+static AttackHit s_last_attacks[MAX_ATTACKS];
+static int       s_last_attack_count;
 
 /* forward decls for round helpers (defined below end_turn) */
 static void enemy_plan_turn(void);
 static void player_roll_random_telegraph(void);
-static bool cell_has_unit(int col, int row);
+static int  unit_at(int col, int row);    /* -1 = none */
 
 /* -------------------------------------------------------------- data tables */
 
@@ -483,30 +491,26 @@ static bool shift_structure(int new_col, int new_row, int si)
 
 static bool advance_hero(int new_col, int new_row)
 {
+    if (s_active_player_idx < 0) return false;
+    Unit *p = &s_units[s_active_player_idx];
     if (new_col < 0 || new_col >= MAP_COLS) return false;
     if (new_row < 0 || new_row >= MAP_ROWS) return false;
-    if (new_col == s_hero_col && new_row == s_hero_row) return false;
+    if (new_col == p->col && new_row == p->row) return false;
 
     /* If destination is occupied by another living unit, swap with it: the
      * displaced unit goes to where the player was, terrain at both cells
      * stays put. Lets the player reposition the enemy (and protected) tile
      * to dodge or redirect attack telegraphs. */
-    bool dest_is_enemy = s_enemy_alive     && new_col == s_enemy_col     && new_row == s_enemy_row;
-    bool dest_is_prot  = s_protected_alive && new_col == s_protected_col && new_row == s_protected_row;
+    int dest_unit = unit_at(new_col, new_row);
 
     int si = s_cell_struct[new_row][new_col];
-    if (dest_is_enemy || dest_is_prot) {
-        int old_hero_col = s_hero_col;
-        int old_hero_row = s_hero_row;
-        if (dest_is_enemy) {
-            s_enemy_col  = old_hero_col;
-            s_enemy_row  = old_hero_row;
-            s_enemy_bump = BUMP_SCALE_PEAK - 1.0f;
-        }
-        if (dest_is_prot) {
-            s_protected_col = old_hero_col;
-            s_protected_row = old_hero_row;
-        }
+    if (dest_unit >= 0 && dest_unit != s_active_player_idx) {
+        Unit *o = &s_units[dest_unit];
+        int old_col = p->col;
+        int old_row = p->row;
+        o->col  = old_col;
+        o->row  = old_row;
+        o->bump = BUMP_SCALE_PEAK - 1.0f;
     } else if (si >= 0) {
         /* Destination is part of a combined tile — push the whole thing. */
         if (!shift_structure(new_col, new_row, si)) {
@@ -520,9 +524,9 @@ static bool advance_hero(int new_col, int new_row)
     } else {
         /* Normal single-tile displacement */
         Terrain displaced = s_map[new_row][new_col];
-        s_map[s_hero_row][s_hero_col] = displaced;
+        s_map[p->row][p->col] = displaced;
 
-        /* Spawn flying tile: slides from hero's destination back to vacated cell */
+        /* Spawn flying tile: slides from player's destination back to vacated cell */
         for (int _fi = 0; _fi < MAX_FLYING_TILES; _fi++) {
             if (!s_flying[_fi].active) {
                 s_flying[_fi] = (FlyingTile){
@@ -530,32 +534,22 @@ static bool advance_hero(int new_col, int new_row)
                     .terrain = displaced,
                     .vis_col = (float)new_col,
                     .vis_row = (float)new_row,
-                    .dst_col = (float)s_hero_col,
-                    .dst_row = (float)s_hero_row,
+                    .dst_col = (float)p->col,
+                    .dst_row = (float)p->row,
                 };
-                s_cell_flying_dst[s_hero_row][s_hero_col] = true;
+                s_cell_flying_dst[p->row][p->col] = true;
                 break;
             }
         }
     }
 
-    if (s_trail_len < MAX_TRAIL) {
-        s_trail_col[s_trail_len] = new_col;
-        s_trail_row[s_trail_len] = new_row;
-        s_trail_age[s_trail_len] = 0.0f;
-        s_trail_len++;
-    }
-
+    p->col  = new_col;
+    p->row  = new_row;
+    p->bump = BUMP_SCALE_PEAK - 1.0f;
+    /* Mirror the active player's position into the legacy hero state so
+     * check_scroll_trigger() and other helpers keep working. */
     s_hero_col = new_col;
     s_hero_row = new_row;
-    s_hero_bump = BUMP_SCALE_PEAK - 1.0f;
-    s_visited_cell[new_row][new_col] = true;
-
-    record_visited(new_col, new_row);
-
-    /* New merges resolve at end of turn, not on every step. Existing
-     * structures are still tracked because shift_structure() updates
-     * s_cell_struct in place. */
 
     return check_scroll_trigger();
 }
@@ -873,21 +867,34 @@ static void award_turn_score(void)
     if (s_turn_count >= TURNS_LIMIT) s_game_over = true;
 }
 
-static bool cell_has_unit(int col, int row)
+/* Returns -1 if no living unit at (col, row), otherwise the unit index. */
+static int unit_at(int col, int row)
 {
-    if (s_player_alive && col == s_hero_col && row == s_hero_row) return true;
-    if (s_enemy_alive && col == s_enemy_col && row == s_enemy_row) return true;
-    if (s_protected_alive && col == s_protected_col && row == s_protected_row) return true;
-    return false;
+    for (int i = 0; i < s_unit_count; i++) {
+        Unit *u = &s_units[i];
+        if (!u->alive) continue;
+        if (u->col == col && u->row == row) return i;
+    }
+    return -1;
 }
 
-/* Swap the enemy onto (new_col, new_row), pushing the terrain there back
- * into the enemy's old cell, like the hero does on each drag step. */
-static void move_enemy_to(int new_col, int new_row)
+static int count_living(UnitKind kind)
 {
-    if (new_col == s_enemy_col && new_row == s_enemy_row) return;
+    int n = 0;
+    for (int i = 0; i < s_unit_count; i++)
+        if (s_units[i].alive && s_units[i].kind == kind) n++;
+    return n;
+}
+
+/* Swap a unit onto (new_col, new_row), pushing the terrain there back
+ * into the unit's old cell. (Skipped if destination is the unit itself.)
+ * Used by enemy planning; assumes destination has no other unit. */
+static void unit_swap_to_terrain(int unit_idx, int new_col, int new_row)
+{
+    Unit *u = &s_units[unit_idx];
+    if (new_col == u->col && new_row == u->row) return;
     Terrain displaced = s_map[new_row][new_col];
-    s_map[s_enemy_row][s_enemy_col] = displaced;
+    s_map[u->row][u->col] = displaced;
 
     for (int fi = 0; fi < MAX_FLYING_TILES; fi++) {
         if (!s_flying[fi].active) {
@@ -896,151 +903,197 @@ static void move_enemy_to(int new_col, int new_row)
                 .terrain = displaced,
                 .vis_col = (float)new_col,
                 .vis_row = (float)new_row,
-                .dst_col = (float)s_enemy_col,
-                .dst_row = (float)s_enemy_row,
+                .dst_col = (float)u->col,
+                .dst_row = (float)u->row,
             };
-            s_cell_flying_dst[s_enemy_row][s_enemy_col] = true;
+            s_cell_flying_dst[u->row][u->col] = true;
             break;
         }
     }
 
-    s_enemy_col  = new_col;
-    s_enemy_row  = new_row;
-    s_enemy_bump = BUMP_SCALE_PEAK - 1.0f;
+    u->col  = new_col;
+    u->row  = new_row;
+    u->bump = BUMP_SCALE_PEAK - 1.0f;
 }
 
 static void player_roll_random_telegraph(void)
 {
-    if (!s_player_alive) { s_player_tele_dc = 0; s_player_tele_dr = 0; return; }
     static const int dxs[4] = {  1, -1,  0,  0 };
     static const int dys[4] = {  0,  0,  1, -1 };
-    int d = GetRandomValue(0, 3);
-    s_player_tele_dc = dxs[d];
-    s_player_tele_dr = dys[d];
+    for (int i = 0; i < s_unit_count; i++) {
+        Unit *u = &s_units[i];
+        if (!u->alive || u->kind != UNIT_PLAYER) continue;
+        int d = GetRandomValue(0, 3);
+        u->tele_dc = dxs[d];
+        u->tele_dr = dys[d];
+    }
 }
 
-static void enemy_plan_turn(void)
+/* Plan one enemy's move + telegraph. Other enemies that already moved
+ * this round occupy their new cells, so each plan accounts for them. */
+static void enemy_plan_one(int enemy_idx)
 {
-    if (!s_enemy_alive) return;
+    Unit *e = &s_units[enemy_idx];
+    if (!e->alive || e->kind != UNIT_ENEMY) return;
 
     static const int dxs[4] = {  1, -1,  0,  0 };
     static const int dys[4] = {  0,  0,  1, -1 };
-
-    /* Gather living targets (player + protected). */
-    int tgt_cols[2], tgt_rows[2];
-    int target_count = 0;
-    if (s_player_alive)    { tgt_cols[target_count] = s_hero_col;      tgt_rows[target_count++] = s_hero_row;      }
-    if (s_protected_alive) { tgt_cols[target_count] = s_protected_col; tgt_rows[target_count++] = s_protected_row; }
 
     int best_col = -1, best_row = -1;
     int best_dist = INT_MAX;
     int best_tgt_col = 0, best_tgt_row = 0;
 
-    for (int ti = 0; ti < target_count; ti++) {
+    /* Iterate all living player/protected targets. */
+    for (int ti = 0; ti < s_unit_count; ti++) {
+        Unit *t = &s_units[ti];
+        if (!t->alive) continue;
+        if (t->kind != UNIT_PLAYER && t->kind != UNIT_PROTECTED) continue;
         for (int d = 0; d < 4; d++) {
-            int nc = tgt_cols[ti] + dxs[d];
-            int nr = tgt_rows[ti] + dys[d];
+            int nc = t->col + dxs[d];
+            int nr = t->row + dys[d];
             if (nc < 0 || nc >= MAP_COLS || nr < 0 || nr >= MAP_ROWS) continue;
-            /* Cannot land on another unit (cell can equal enemy's own current cell). */
-            if (!(nc == s_enemy_col && nr == s_enemy_row) && cell_has_unit(nc, nr)) continue;
-            int dist = abs(nc - s_enemy_col) + abs(nr - s_enemy_row);
+            int occupant = unit_at(nc, nr);
+            if (occupant >= 0 && occupant != enemy_idx) continue;
+            int dist = abs(nc - e->col) + abs(nr - e->row);
             if (dist < best_dist) {
                 best_dist    = dist;
                 best_col     = nc;
                 best_row     = nr;
-                best_tgt_col = tgt_cols[ti];
-                best_tgt_row = tgt_rows[ti];
+                best_tgt_col = t->col;
+                best_tgt_row = t->row;
             }
         }
     }
 
     if (best_col >= 0) {
-        move_enemy_to(best_col, best_row);
-        s_enemy_tele_dc = best_tgt_col - best_col;
-        s_enemy_tele_dr = best_tgt_row - best_row;
+        unit_swap_to_terrain(enemy_idx, best_col, best_row);
+        e->tele_dc = best_tgt_col - e->col;
+        e->tele_dr = best_tgt_row - e->row;
         return;
     }
 
-    /* Fallback: no valid adjacency to any target. Hop to a random free cell
-     * and telegraph a random cardinal direction (may not hit anything). */
+    /* Fallback: walled in. Hop to a random free cell + random direction. */
     for (int tries = 0; tries < 100; tries++) {
         int nc = GetRandomValue(0, MAP_COLS - 1);
         int nr = GetRandomValue(0, MAP_ROWS - 1);
-        if (cell_has_unit(nc, nr)) continue;
-        move_enemy_to(nc, nr);
+        int occupant = unit_at(nc, nr);
+        if (occupant >= 0 && occupant != enemy_idx) continue;
+        unit_swap_to_terrain(enemy_idx, nc, nr);
         break;
     }
     int d = GetRandomValue(0, 3);
-    s_enemy_tele_dc = dxs[d];
-    s_enemy_tele_dr = dys[d];
+    e->tele_dc = dxs[d];
+    e->tele_dr = dys[d];
+}
+
+static void enemy_plan_turn(void)
+{
+    for (int i = 0; i < s_unit_count; i++) {
+        if (s_units[i].alive && s_units[i].kind == UNIT_ENEMY)
+            enemy_plan_one(i);
+    }
 }
 
 /* Resolve simultaneous attacks: snapshot each living unit's telegraph
- * target, then apply destruction at end. Either side hitting destroys
- * the unit on that tile (friendly fire included for the puzzle). */
+ * target, then apply destruction at end. Friendly fire is intentional. */
 static void resolve_round(void)
 {
-    int p_tc = -1, p_tr = -1;
-    int e_tc = -1, e_tr = -1;
-    if (s_player_alive && (s_player_tele_dc != 0 || s_player_tele_dr != 0)) {
-        p_tc = s_hero_col + s_player_tele_dc;
-        p_tr = s_hero_row + s_player_tele_dr;
-    }
-    if (s_enemy_alive && (s_enemy_tele_dc != 0 || s_enemy_tele_dr != 0)) {
-        e_tc = s_enemy_col + s_enemy_tele_dc;
-        e_tr = s_enemy_row + s_enemy_tele_dr;
-    }
+    s_last_attack_count = 0;
 
-    bool kill_player = false, kill_enemy = false, kill_protected = false;
-
-    s_last_player_atk_col = p_tc; s_last_player_atk_row = p_tr;
-    s_last_enemy_atk_col  = e_tc; s_last_enemy_atk_row  = e_tr;
-
-    if (p_tc >= 0) {
-        if (s_enemy_alive     && p_tc == s_enemy_col     && p_tr == s_enemy_row)     kill_enemy     = true;
-        if (s_protected_alive && p_tc == s_protected_col && p_tr == s_protected_row) kill_protected = true;
-        if (s_player_alive    && p_tc == s_hero_col      && p_tr == s_hero_row)      kill_player    = true;
-    }
-    if (e_tc >= 0) {
-        if (s_enemy_alive     && e_tc == s_enemy_col     && e_tr == s_enemy_row)     kill_enemy     = true;
-        if (s_protected_alive && e_tc == s_protected_col && e_tr == s_protected_row) kill_protected = true;
-        if (s_player_alive    && e_tc == s_hero_col      && e_tr == s_hero_row)      kill_player    = true;
+    /* Snapshot: list (target_col, target_row, who_attacked_side) for each
+     * living unit with a telegraph. */
+    int tgt_col[MAX_UNITS], tgt_row[MAX_UNITS];
+    bool tgt_by_player[MAX_UNITS];
+    int  atk_count = 0;
+    for (int i = 0; i < s_unit_count; i++) {
+        Unit *u = &s_units[i];
+        if (!u->alive) continue;
+        if (u->tele_dc == 0 && u->tele_dr == 0) continue;
+        int tc = u->col + u->tele_dc;
+        int tr = u->row + u->tele_dr;
+        if (tc < 0 || tc >= MAP_COLS || tr < 0 || tr >= MAP_ROWS) continue;
+        tgt_col[atk_count]       = tc;
+        tgt_row[atk_count]       = tr;
+        tgt_by_player[atk_count] = (u->kind == UNIT_PLAYER);
+        atk_count++;
+        if (s_last_attack_count < MAX_ATTACKS) {
+            s_last_attacks[s_last_attack_count++] = (AttackHit){
+                .col = tc, .row = tr, .by_player = (u->kind == UNIT_PLAYER),
+            };
+        }
     }
 
-    if (kill_player)    s_player_alive    = false;
-    if (kill_enemy)     s_enemy_alive     = false;
-    if (kill_protected) s_protected_alive = false;
+    /* Apply deaths: for each snapshotted attack, kill whoever is on the
+     * target cell (friend or foe). Reads positions BEFORE applying so
+     * resolution is simultaneous. */
+    bool kill[MAX_UNITS] = { 0 };
+    for (int a = 0; a < atk_count; a++) {
+        for (int i = 0; i < s_unit_count; i++) {
+            Unit *u = &s_units[i];
+            if (!u->alive) continue;
+            if (u->col == tgt_col[a] && u->row == tgt_row[a]) kill[i] = true;
+        }
+    }
+    for (int i = 0; i < s_unit_count; i++)
+        if (kill[i]) s_units[i].alive = false;
+    (void)tgt_by_player; /* recorded above for the flash colour */
 
-    /* Stage the brief on-hit flash regardless of whether anyone died. */
     s_resolve_flash = RESOLVE_FLASH_SECS;
 
-    /* Win/lose checks. */
-    if (!s_enemy_alive) {
+    int alive_enemies   = count_living(UNIT_ENEMY);
+    int alive_players   = count_living(UNIT_PLAYER);
+    int alive_protected = count_living(UNIT_PROTECTED);
+
+    if (alive_enemies == 0) {
         s_player_won = true;
         s_game_over  = true;
         return;
     }
-    if (!s_player_alive || !s_protected_alive) {
+    if (alive_players == 0 || alive_protected == 0) {
         s_player_lost = true;
         s_game_over   = true;
         return;
     }
 
-    /* Game continues: clear telegraphs and plan the next round. */
-    s_player_tele_dc = 0; s_player_tele_dr = 0;
-    s_enemy_tele_dc  = 0; s_enemy_tele_dr  = 0;
+    /* Game continues: clear telegraphs, plan next round. */
+    for (int i = 0; i < s_unit_count; i++) {
+        s_units[i].tele_dc = 0;
+        s_units[i].tele_dr = 0;
+    }
     enemy_plan_turn();
     player_roll_random_telegraph();
+
+    /* Active player may have just died — drop the drag handle. */
+    if (s_active_player_idx >= 0 && !s_units[s_active_player_idx].alive)
+        s_active_player_idx = -1;
 }
 
 static void end_turn(void)
 {
-    s_is_dragging = false;
-    s_flash_count = 0;
+    s_is_dragging       = false;
+    s_active_player_idx = -1;
+    s_flash_count       = 0;
     resolve_round();
     s_phase      = PHASE_SCANNING;
     s_scan_flash = s_resolve_flash;
     s_turn_timer = TURN_SECS;
+}
+
+static void spawn_unit(UnitKind kind, int col, int row)
+{
+    if (s_unit_count >= MAX_UNITS) return;
+    if (col < 0 || col >= MAP_COLS || row < 0 || row >= MAP_ROWS) return;
+    if (unit_at(col, row) >= 0) return;
+    Unit *u = &s_units[s_unit_count++];
+    u->kind    = kind;
+    u->alive   = true;
+    u->col     = col;
+    u->row     = row;
+    u->tele_dc = 0;
+    u->tele_dr = 0;
+    u->vis_col = (float)col;
+    u->vis_row = (float)row;
+    u->bump    = 0.0f;
 }
 
 /* ------------------------------------------------------------- map generation */
@@ -1065,23 +1118,20 @@ static void on_down(Vector2 pos)
 {
     if (s_game_over) return;
     if (s_phase != PHASE_IDLE) return;
-    if (!s_player_alive) return;
 
     int col, row;
     if (!screen_to_tile(pos, &col, &row)) return;
-    if (col != s_hero_col || row != s_hero_row) return;
+    int hit = unit_at(col, row);
+    if (hit < 0) return;
+    if (s_units[hit].kind != UNIT_PLAYER) return;
 
-    s_is_dragging       = true;
-    s_turn_timer        = TURN_SECS;
-    s_phase             = PHASE_DRAGGING;
-    s_trail_len         = 0;
-    s_scanned_col_count = 0;
-    s_scanned_row_count = 0;
-    memset(s_col_visited,   0, sizeof(s_col_visited));
-    memset(s_row_visited,   0, sizeof(s_row_visited));
-    memset(s_visited_cell,  0, sizeof(s_visited_cell));
-    s_visited_cell[s_hero_row][s_hero_col] = true;
-    record_visited(s_hero_col, s_hero_row);
+    s_active_player_idx = hit;
+    s_hero_col = s_units[hit].col;
+    s_hero_row = s_units[hit].row;
+
+    s_is_dragging = true;
+    s_turn_timer  = TURN_SECS;
+    s_phase       = PHASE_DRAGGING;
     s_vp_col_prev = s_vp_col;
     s_vp_row_prev = s_vp_row;
     s_move_cd     = 0.0f;
@@ -1491,31 +1541,39 @@ static void draw_units(void)
     int gy = grid_y();
     BeginScissorMode(gx, gy, VIEW_COLS * ts, VIEW_ROWS * ts);
 
-    /* Protected tile (gold). */
-    if (s_protected_alive) {
-        draw_unit_glyph(s_protected_vis_col, s_protected_vis_row, 0.0f, "P",
-            (Color){ 255, 215,  80, 255 }, /* fill */
-            (Color){ 180, 130,   0, 255 }, /* border */
-            (Color){ 255, 200,  60,  80 }, /* glow */
-            (Color){  60,  35,   0, 230 });
-    }
-
-    /* Enemy (deep red). */
-    if (s_enemy_alive) {
-        draw_unit_glyph(s_enemy_vis_col, s_enemy_vis_row, s_enemy_bump, "E",
-            (Color){ 220,  60,  60, 255 },
-            (Color){ 110,  10,  10, 255 },
-            (Color){ 255,  70,  70, 110 },
-            (Color){  30,   0,   0, 240 });
-    }
-
-    /* Player (white/magenta — keep the existing look). */
-    if (s_player_alive) {
-        draw_unit_glyph(s_hero_vis_col, s_hero_vis_row, s_hero_bump, "@",
-            (Color){ 255, 255, 255, 255 },
-            (Color){ 220,  80, 255, 255 },
-            (Color){ 220, 100, 255,  60 },
-            (Color){  40,   0,  60, 220 });
+    /* Draw in priority order so players land on top of overlapping cells. */
+    for (int pass = 0; pass < 3; pass++) {
+        UnitKind want = (pass == 0) ? UNIT_PROTECTED
+                       : (pass == 1) ? UNIT_ENEMY
+                                     : UNIT_PLAYER;
+        for (int i = 0; i < s_unit_count; i++) {
+            Unit *u = &s_units[i];
+            if (!u->alive || u->kind != want) continue;
+            switch (u->kind) {
+            case UNIT_PROTECTED:
+                draw_unit_glyph(u->vis_col, u->vis_row, u->bump, "P",
+                    (Color){ 255, 215,  80, 255 },
+                    (Color){ 180, 130,   0, 255 },
+                    (Color){ 255, 200,  60,  80 },
+                    (Color){  60,  35,   0, 230 });
+                break;
+            case UNIT_ENEMY:
+                draw_unit_glyph(u->vis_col, u->vis_row, u->bump, "E",
+                    (Color){ 220,  60,  60, 255 },
+                    (Color){ 110,  10,  10, 255 },
+                    (Color){ 255,  70,  70, 110 },
+                    (Color){  30,   0,   0, 240 });
+                break;
+            case UNIT_PLAYER:
+                draw_unit_glyph(u->vis_col, u->vis_row, u->bump, "@",
+                    (Color){ 255, 255, 255, 255 },
+                    (Color){ 220,  80, 255, 255 },
+                    (Color){ 220, 100, 255,  60 },
+                    (Color){  40,   0,  60, 220 });
+                break;
+            default: break;
+            }
+        }
     }
 
     EndScissorMode();
@@ -1576,16 +1634,14 @@ static void draw_telegraphs(void)
     int gx = grid_x();
     int gy = grid_y();
     BeginScissorMode(gx, gy, VIEW_COLS * ts, VIEW_ROWS * ts);
-    if (s_enemy_alive) {
-        /* enemy attack origin tracks visible col/row so it follows the swap anim */
-        draw_telegraph(s_enemy_col, s_enemy_row,
-                       s_enemy_tele_dc, s_enemy_tele_dr,
-                       (Color){ 230,  70,  70, 255 });
-    }
-    if (s_player_alive) {
-        draw_telegraph(s_hero_col, s_hero_row,
-                       s_player_tele_dc, s_player_tele_dr,
-                       (Color){  70, 200, 255, 255 });
+    for (int i = 0; i < s_unit_count; i++) {
+        Unit *u = &s_units[i];
+        if (!u->alive) continue;
+        if (u->tele_dc == 0 && u->tele_dr == 0) continue;
+        Color col = (u->kind == UNIT_ENEMY)
+                      ? (Color){ 230,  70,  70, 255 }
+                      : (Color){  70, 200, 255, 255 };
+        draw_telegraph(u->col, u->row, u->tele_dc, u->tele_dr, col);
     }
     EndScissorMode();
 }
@@ -1604,21 +1660,15 @@ static void draw_resolve_flash(void)
     float pulse = 0.5f + 0.5f * sinf(frac * 3.14159f * 4.0f);
     unsigned char a = (unsigned char)(pulse * 230.0f);
     BeginScissorMode(gx, gy, VIEW_COLS * ts, VIEW_ROWS * ts);
-    int cells[2][2] = {
-        { s_last_player_atk_col, s_last_player_atk_row },
-        { s_last_enemy_atk_col,  s_last_enemy_atk_row  },
-    };
-    Color cols[2] = {
-        { 120, 230, 255, a },   /* player hit  – cool blue */
-        { 255,  80,  80, a },   /* enemy hit   – red       */
-    };
-    for (int i = 0; i < 2; i++) {
-        int c = cells[i][0], r = cells[i][1];
-        if (c < 0 || r < 0) continue;
-        int sx = (int)((c - s_vp_vis_col) * ts) + gx;
-        int sy = (int)((r - s_vp_vis_row) * ts) + gy;
+    for (int i = 0; i < s_last_attack_count; i++) {
+        AttackHit *h = &s_last_attacks[i];
+        Color c = h->by_player
+                    ? (Color){ 120, 230, 255, a }
+                    : (Color){ 255,  80,  80, a };
+        int sx = (int)((h->col - s_vp_vis_col) * ts) + gx;
+        int sy = (int)((h->row - s_vp_vis_row) * ts) + gy;
         int tw = ts - 1;
-        DrawRectangle(sx, sy, tw, tw, cols[i]);
+        DrawRectangle(sx, sy, tw, tw, c);
         DrawRectangleLinesEx((Rectangle){ (float)sx, (float)sy,
                                           (float)tw, (float)tw },
                              3.0f, (Color){ 255, 255, 255, a });
@@ -2042,39 +2092,47 @@ static void RealmWalkInit(void)
     generate_map();
     clear_structures();
 
-    /* Place the three tactical units at clearly-separated cells. */
-    s_player_alive    = true;
-    s_enemy_alive     = true;
-    s_protected_alive = true;
     s_player_won  = false;
     s_player_lost = false;
+    s_unit_count  = 0;
+    s_active_player_idx = -1;
 
-    /* Cluster the three units so all fit in the 6×8 viewport. */
-    s_hero_col       = MAP_COLS / 2 - 3;
-    s_hero_row       = MAP_ROWS / 2;
-    s_protected_col  = MAP_COLS / 2;
-    s_protected_row  = MAP_ROWS / 2;
-    s_enemy_col      = MAP_COLS / 2 + 2;
-    s_enemy_row      = MAP_ROWS / 2 - 1;
+    /* Cluster spawn around the map centre: 4 players, 4 protected, 6 enemies.
+     * Layout (cols roughly 10-19, rows 7-13): players on the left, protected
+     * tucked in the middle, enemies on the right. */
+    int cx = MAP_COLS / 2;
+    int cy = MAP_ROWS / 2;
 
-    s_enemy_vis_col      = (float)s_enemy_col;
-    s_enemy_vis_row      = (float)s_enemy_row;
-    s_enemy_bump         = 0.0f;
-    s_protected_vis_col  = (float)s_protected_col;
-    s_protected_vis_row  = (float)s_protected_row;
+    spawn_unit(UNIT_PLAYER,    cx - 5, cy - 2);
+    spawn_unit(UNIT_PLAYER,    cx - 5, cy    );
+    spawn_unit(UNIT_PLAYER,    cx - 5, cy + 2);
+    spawn_unit(UNIT_PLAYER,    cx - 4, cy + 1);
 
-    s_player_tele_dc = 0; s_player_tele_dr = 0;
-    s_enemy_tele_dc  = 0; s_enemy_tele_dr  = 0;
-    s_last_player_atk_col = -1; s_last_player_atk_row = -1;
-    s_last_enemy_atk_col  = -1; s_last_enemy_atk_row  = -1;
+    spawn_unit(UNIT_PROTECTED, cx - 1, cy - 2);
+    spawn_unit(UNIT_PROTECTED, cx - 1, cy    );
+    spawn_unit(UNIT_PROTECTED, cx - 1, cy + 2);
+    spawn_unit(UNIT_PROTECTED, cx    , cy + 1);
+
+    spawn_unit(UNIT_ENEMY,     cx + 3, cy - 3);
+    spawn_unit(UNIT_ENEMY,     cx + 3, cy - 1);
+    spawn_unit(UNIT_ENEMY,     cx + 3, cy + 1);
+    spawn_unit(UNIT_ENEMY,     cx + 3, cy + 3);
+    spawn_unit(UNIT_ENEMY,     cx + 4, cy    );
+    spawn_unit(UNIT_ENEMY,     cx + 4, cy + 2);
+
+    /* Legacy hero state seeded from the first player (the active player
+     * is rebound on tap). */
+    s_hero_col = s_units[0].col;
+    s_hero_row = s_units[0].row;
+
+    s_last_attack_count = 0;
     s_resolve_flash = 0.0f;
 
     int vc = vis_cols();
     int vr = vis_rows();
-    /* Centre the viewport on the protected tile so all three units are
-     * visible at game start. */
-    s_vp_col = s_protected_col - vc / 2;
-    s_vp_row = s_protected_row - vr / 2;
+    /* Centre the viewport on the cluster centre. */
+    s_vp_col = cx - vc / 2;
+    s_vp_row = cy - vr / 2;
     if (s_vp_col < 0) s_vp_col = 0;
     if (s_vp_row < 0) s_vp_row = 0;
     if (s_vp_col + vc > MAP_COLS) s_vp_col = MAP_COLS - vc;
@@ -2189,14 +2247,15 @@ static void RealmWalkUpdate(float dt)
             if (s_hero_bump < 0.0f) s_hero_bump = 0.0f;
         }
 
-        /* Enemy + protected visual lerps */
-        s_enemy_vis_col     += ((float)s_enemy_col     - s_enemy_vis_col)     * k_hero;
-        s_enemy_vis_row     += ((float)s_enemy_row     - s_enemy_vis_row)     * k_hero;
-        s_protected_vis_col += ((float)s_protected_col - s_protected_vis_col) * k_hero;
-        s_protected_vis_row += ((float)s_protected_row - s_protected_vis_row) * k_hero;
-        if (s_enemy_bump > 0.0f) {
-            s_enemy_bump -= BUMP_DECAY * dt;
-            if (s_enemy_bump < 0.0f) s_enemy_bump = 0.0f;
+        /* Per-unit visual lerp + bump decay. */
+        for (int ui = 0; ui < s_unit_count; ui++) {
+            Unit *u = &s_units[ui];
+            u->vis_col += ((float)u->col - u->vis_col) * k_hero;
+            u->vis_row += ((float)u->row - u->vis_row) * k_hero;
+            if (u->bump > 0.0f) {
+                u->bump -= BUMP_DECAY * dt;
+                if (u->bump < 0.0f) u->bump = 0.0f;
+            }
         }
 
         for (int _fi = 0; _fi < MAX_FLYING_TILES; _fi++) {
@@ -2282,12 +2341,13 @@ static void draw_end_game(void)
     Color       title_c;
     if (s_player_won) {
         title    = "VICTORY";
-        subtitle = "Enemy destroyed";
+        subtitle = "All enemies destroyed";
         title_c  = (Color){ 100, 240, 100, 255 };
     } else {
         title    = "DEFEAT";
-        subtitle = !s_protected_alive ? "Protected tile lost"
-                                       : "Player tile lost";
+        subtitle = (count_living(UNIT_PROTECTED) == 0)
+                       ? "All protected tiles lost"
+                       : "All player tiles lost";
         title_c  = (Color){ 255,  80,  80, 255 };
     }
     int tfs = sh / 9;
@@ -2316,15 +2376,20 @@ static void draw_hud_status(void)
     DrawRectangle(0, 0, sw, fs * 2, (Color){ 0, 0, 0, 220 });
     DrawLine(0, fs * 2, sw, fs * 2, (Color){ 80, 200, 255, 160 });
 
-    const char *msg = "Protect the gold tile";
-    DrawText(msg, pad, fs / 2, fs, (Color){ 220, 230, 240, 240 });
+    int enemies   = count_living(UNIT_ENEMY);
+    int players   = count_living(UNIT_PLAYER);
+    int protectds = count_living(UNIT_PROTECTED);
 
-    char buf[32];
-    snprintf(buf, sizeof(buf), "Enemies: %d", s_enemy_alive ? 1 : 0);
-    int bw = MeasureText(buf, fs);
-    DrawText(buf, sw - pad - bw, fs / 2, fs,
-             s_enemy_alive ? (Color){ 240, 110, 110, 240 }
-                           : (Color){ 100, 240, 130, 240 });
+    char left[64];
+    snprintf(left, sizeof(left), "P:%d  *:%d", players, protectds);
+    DrawText(left, pad, fs / 2, fs, (Color){ 220, 230, 240, 240 });
+
+    char right[32];
+    snprintf(right, sizeof(right), "E:%d", enemies);
+    int rw = MeasureText(right, fs);
+    DrawText(right, sw - pad - rw, fs / 2, fs,
+             enemies ? (Color){ 240, 110, 110, 240 }
+                     : (Color){ 100, 240, 130, 240 });
 }
 
 static void RealmWalkDraw(void)
