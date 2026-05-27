@@ -487,12 +487,27 @@ static bool advance_hero(int new_col, int new_row)
     if (new_row < 0 || new_row >= MAP_ROWS) return false;
     if (new_col == s_hero_col && new_row == s_hero_row) return false;
 
-    /* Block stepping onto another living unit (enemy / protected). */
-    if (s_enemy_alive && new_col == s_enemy_col && new_row == s_enemy_row) return false;
-    if (s_protected_alive && new_col == s_protected_col && new_row == s_protected_row) return false;
+    /* If destination is occupied by another living unit, swap with it: the
+     * displaced unit goes to where the player was, terrain at both cells
+     * stays put. Lets the player reposition the enemy (and protected) tile
+     * to dodge or redirect attack telegraphs. */
+    bool dest_is_enemy = s_enemy_alive     && new_col == s_enemy_col     && new_row == s_enemy_row;
+    bool dest_is_prot  = s_protected_alive && new_col == s_protected_col && new_row == s_protected_row;
 
     int si = s_cell_struct[new_row][new_col];
-    if (si >= 0) {
+    if (dest_is_enemy || dest_is_prot) {
+        int old_hero_col = s_hero_col;
+        int old_hero_row = s_hero_row;
+        if (dest_is_enemy) {
+            s_enemy_col  = old_hero_col;
+            s_enemy_row  = old_hero_row;
+            s_enemy_bump = BUMP_SCALE_PEAK - 1.0f;
+        }
+        if (dest_is_prot) {
+            s_protected_col = old_hero_col;
+            s_protected_row = old_hero_row;
+        }
+    } else if (si >= 0) {
         /* Destination is part of a combined tile — push the whole thing. */
         if (!shift_structure(new_col, new_row, si)) {
             /* Structure can't move (wall, other structure) — block the hero. */
