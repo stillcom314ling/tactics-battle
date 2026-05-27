@@ -1600,12 +1600,14 @@ static void draw_telegraph(int origin_col, int origin_row, int dc, int dr, Color
     int sy = (int)((tr - s_vp_vis_row) * ts) + gy;
     int tw = ts - 1;
 
-    Color fill = (Color){ col.r, col.g, col.b, (unsigned char)(pulse * 140) };
+    /* Light fill (tints the unit underneath without obscuring it) plus a
+     * thick pulsing border so the cell reads clearly even on top of a tile. */
+    Color fill = (Color){ col.r, col.g, col.b, (unsigned char)(pulse * 90) };
     Color edge = (Color){ col.r, col.g, col.b, 255 };
     DrawRectangleRounded((Rectangle){ (float)sx, (float)sy, (float)tw, (float)tw },
                          0.18f, 4, fill);
     DrawRectangleLinesEx((Rectangle){ (float)sx, (float)sy, (float)tw, (float)tw },
-                         3.0f, edge);
+                         4.0f + pulse * 2.0f, edge);
 
     /* arrow from origin → target */
     Vector2 a = tile_center_screen(origin_col, origin_row);
@@ -2396,10 +2398,13 @@ static void RealmWalkDraw(void)
 {
     ClearBackground((Color){ 0, 0, 0, 255 });
     draw_map_tiles();
-    draw_telegraphs();
-    draw_resolve_flash();
     draw_flying_tiles();
     draw_units();
+    /* Telegraphs and the resolve flash render on top of units so the
+     * player can always see which cells are about to be hit, even when
+     * the targeted cell currently holds a tile they're dragging. */
+    draw_telegraphs();
+    draw_resolve_flash();
     draw_nav_buttons();
     draw_hud_status();
     draw_timer_bar();
