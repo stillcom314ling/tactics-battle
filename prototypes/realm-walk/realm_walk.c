@@ -2099,28 +2099,29 @@ static void RealmWalkInit(void)
     s_unit_count  = 0;
     s_active_player_idx = -1;
 
-    /* Cluster spawn around the map centre: 4 players, 4 protected, 6 enemies.
-     * Layout (cols roughly 10-19, rows 7-13): players on the left, protected
-     * tucked in the middle, enemies on the right. */
+    /* Interleaved spawn around the map centre: every enemy starts adjacent
+     * to at least one player or protected tile so the first round is
+     * already contested. Layout fits inside a 6x5 region (cols cx-3..cx+2,
+     * rows cy-2..cy+2). */
     int cx = MAP_COLS / 2;
     int cy = MAP_ROWS / 2;
 
-    spawn_unit(UNIT_PLAYER,    cx - 5, cy - 2);
-    spawn_unit(UNIT_PLAYER,    cx - 5, cy    );
-    spawn_unit(UNIT_PLAYER,    cx - 5, cy + 2);
-    spawn_unit(UNIT_PLAYER,    cx - 4, cy + 1);
+    spawn_unit(UNIT_PLAYER,    cx - 3, cy - 2);
+    spawn_unit(UNIT_PLAYER,    cx - 1, cy - 1);
+    spawn_unit(UNIT_PLAYER,    cx + 2, cy + 1);
+    spawn_unit(UNIT_PLAYER,    cx - 2, cy + 2);
 
-    spawn_unit(UNIT_PROTECTED, cx - 1, cy - 2);
+    spawn_unit(UNIT_PROTECTED, cx + 1, cy - 2);
     spawn_unit(UNIT_PROTECTED, cx - 1, cy    );
-    spawn_unit(UNIT_PROTECTED, cx - 1, cy + 2);
-    spawn_unit(UNIT_PROTECTED, cx    , cy + 1);
+    spawn_unit(UNIT_PROTECTED, cx    , cy    );
+    spawn_unit(UNIT_PROTECTED, cx + 1, cy + 2);
 
-    spawn_unit(UNIT_ENEMY,     cx + 3, cy - 3);
-    spawn_unit(UNIT_ENEMY,     cx + 3, cy - 1);
-    spawn_unit(UNIT_ENEMY,     cx + 3, cy + 1);
-    spawn_unit(UNIT_ENEMY,     cx + 3, cy + 3);
-    spawn_unit(UNIT_ENEMY,     cx + 4, cy    );
-    spawn_unit(UNIT_ENEMY,     cx + 4, cy + 2);
+    spawn_unit(UNIT_ENEMY,     cx - 2, cy - 2);
+    spawn_unit(UNIT_ENEMY,     cx + 2, cy - 2);
+    spawn_unit(UNIT_ENEMY,     cx    , cy - 1);
+    spawn_unit(UNIT_ENEMY,     cx + 2, cy    );
+    spawn_unit(UNIT_ENEMY,     cx - 1, cy + 1);
+    spawn_unit(UNIT_ENEMY,     cx - 1, cy + 2);
 
     /* Legacy hero state seeded from the first player (the active player
      * is rebound on tap). */
