@@ -143,6 +143,7 @@ static float s_hud_t;       /* 0 = closed, 1 = open */
 static bool  s_legend_open;
 static float s_legend_t;    /* 0 = closed, 1 = open */
 static float s_scan_flash;  /* counts down from SCAN_FLASH_SECS */
+static bool  s_view_locked; /* when true, viewport never auto-pans */
 
 /* matched-cell flash positions — populated during scan, drawn during PHASE_SCANNING */
 static int s_flash_col[MAX_FLASH_CELLS];
@@ -328,7 +329,10 @@ static Vector2 tile_center_screen(int map_col, int map_row)
     };
 }
 
-/* Nav button geometry: row of 4 buttons (<, ^, v, >) above the legend tab. */
+/* Nav button geometry: row of 5 buttons (<, ^, v, >, lock) above the
+ * legend tab. Index 4 is the view-lock toggle. */
+#define NAV_BTN_COUNT 5
+#define NAV_BTN_LOCK  4
 static Rectangle nav_btn_rect(int idx)
 {
     int sw    = GetScreenWidth();
@@ -336,7 +340,7 @@ static Rectangle nav_btn_rect(int idx)
     int leg_h = sh * 7 / 100;
     int s     = nav_btn_size();
     int gap   = s / 6;
-    int total = s * 4 + gap * 3;
+    int total = s * NAV_BTN_COUNT + gap * (NAV_BTN_COUNT - 1);
     int x     = (sw - total) / 2;
     int y     = sh - leg_h - gap - s;
     return (Rectangle){ (float)(x + idx * (s + gap)), (float)y, (float)s, (float)s };
@@ -344,7 +348,7 @@ static Rectangle nav_btn_rect(int idx)
 
 static int touch_nav_btn(Vector2 pos)
 {
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < NAV_BTN_COUNT; i++)
         if (CheckCollisionPointRec(pos, nav_btn_rect(i))) return i;
     return -1;
 }
@@ -413,6 +417,8 @@ static void record_visited(int col, int row)
 
 static bool check_scroll_trigger(void)
 {
+    if (s_view_locked) return false;   /* view pinned — never auto-pan */
+
     int vc = vis_cols();
     int vr = vis_rows();
     int old_vp_col = s_vp_col;
@@ -1184,14 +1190,19 @@ static void on_up(Vector2 pos)
         return;
     }
 
-    /* Nav buttons pan the viewport one tile in their direction. */
+    /* Nav buttons: 0-3 pan the viewport, 4 toggles the view lock.
+     * Pan arrows are inert while the view is locked. */
     int btn = touch_nav_btn(pos);
     if (btn >= 0) {
-        if      (btn == 0) s_vp_col--;
-        else if (btn == 1) s_vp_row--;
-        else if (btn == 2) s_vp_row++;
-        else if (btn == 3) s_vp_col++;
-        clamp_viewport();
+        if (btn == NAV_BTN_LOCK) {
+            s_view_locked = !s_view_locked;
+        } else if (!s_view_locked) {
+            if      (btn == 0) s_vp_col--;
+            else if (btn == 1) s_vp_row--;
+            else if (btn == 2) s_vp_row++;
+            else if (btn == 3) s_vp_col++;
+            clamp_viewport();
+        }
         return;
     }
 
@@ -1851,6 +1862,28 @@ static void draw_legend_grid(int x, int y, int cs,
                              cells[r * cols + c], filler);
 }
 
+/* Draw a small padlock centred in rect r. closed = shackle down (locked). */
+static void draw_lock_icon(Rectangle r, bool closed, Color c)
+{
+    int   bw = (int)(r.width * 0.46f);          /* body width  */
+    int   bh = (int)(r.height * 0.34f);         /* body height */
+    int   bx = (int)(r.x + (r.width  - bw) / 2);
+    int   by = (int)(r.y + r.height * 0.50f);
+    /* lock body */
+    DrawRectangleRounded((Rectangle){ (float)bx, (float)by, (float)bw, (float)bh },
+                         0.25f, 4, c);
+    /* keyhole */
+    DrawCircle(bx + bw / 2, by + bh / 2, (float)bh * 0.16f, (Color){ 10, 10, 14, 220 });
+    /* shackle: outlined arch above the body */
+    int   sw2 = (int)(bw * 0.62f);
+    int   sx  = bx + (bw - sw2) / 2;
+    int   sh2 = (int)(r.height * (closed ? 0.26f : 0.32f));
+    int   sy  = by - sh2 + (closed ? 2 : -1);
+    float th  = (float)(bh * 0.20f); if (th < 2.0f) th = 2.0f;
+    DrawRectangleLinesEx((Rectangle){ (float)sx, (float)sy, (float)sw2, (float)(sh2 + bh) },
+                         th, c);
+}
+
 static void draw_nav_buttons(void)
 {
     static const char *labels[4] = { "<", "^", "v", ">" };
@@ -1867,19 +1900,21 @@ static void draw_nav_buttons(void)
 
     for (int i = 0; i < 4; i++) {
         Rectangle r = nav_btn_rect(i);
+        /* When the view is locked the pan arrows are inert. */
+        bool enabled = can_enable[i] && !s_view_locked;
 
         bool hover = CheckCollisionPointRec(mp, r);
-        bool press = (mouse_dn && hover) ||
-                     (touch_n > 0 && CheckCollisionPointRec(tp, r));
+        bool press = enabled && ((mouse_dn && hover) ||
+                     (touch_n > 0 && CheckCollisionPointRec(tp, r)));
 
-        Color fill = can_enable[i]
+        Color fill = enabled
                        ? (press ? (Color){ 60, 30, 70, 250 }
                                 : (Color){ 20, 20, 28, 240 })
                        : (Color){ 12, 12, 16, 200 };
-        Color edge = can_enable[i]
+        Color edge = enabled
                        ? (Color){ 220, 80, 255, 220 }
                        : (Color){ 80, 60, 100, 120 };
-        Color text = can_enable[i]
+        Color text = enabled
                        ? (Color){ 240, 240, 250, 250 }
                        : (Color){ 110, 110, 130, 180 };
 
@@ -1892,6 +1927,20 @@ static void draw_nav_buttons(void)
                  (int)(r.x + (r.width  - lw) / 2),
                  (int)(r.y + (r.height - fs) / 2),
                  fs, text);
+    }
+
+    /* Lock toggle (index 4). Highlighted when engaged. */
+    {
+        Rectangle r = nav_btn_rect(NAV_BTN_LOCK);
+        Color fill = s_view_locked ? (Color){ 30, 70, 50, 250 }
+                                   : (Color){ 20, 20, 28, 240 };
+        Color edge = s_view_locked ? (Color){ 90, 240, 150, 240 }
+                                   : (Color){ 120, 130, 150, 200 };
+        Color icon = s_view_locked ? (Color){ 120, 245, 170, 255 }
+                                   : (Color){ 200, 205, 215, 230 };
+        DrawRectangleRounded(r, 0.28f, 6, fill);
+        DrawRectangleLinesEx(r, 2.0f, edge);
+        draw_lock_icon(r, s_view_locked, icon);
     }
 }
 
@@ -2179,6 +2228,7 @@ static void RealmWalkInit(void)
     s_hud_t         = 0.0f;
     s_legend_open   = false;
     s_legend_t      = 0.0f;
+    s_view_locked   = false;
     s_prev_tc       = 0;
     s_prev_touch    = (Vector2){ -1.0f, -1.0f };
 
