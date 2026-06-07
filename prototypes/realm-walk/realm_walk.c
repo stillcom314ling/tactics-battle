@@ -2182,19 +2182,12 @@ static void draw_threats(void)
     EndScissorMode();
 }
 
-/* Player attack-preview cells for the actively-dragged player unit, or
- * (when idle) for the currently-inspected unit so the user can see where
- * each class hits before committing. */
-static void draw_player_previews(void)
+/* Render one player unit's attack-preview tiles. `strength` controls the
+ * overlay alpha so the active drag stands out over the stationary peers. */
+static void draw_one_player_preview(int idx, float strength)
 {
-    if (s_phase != PHASE_IDLE && s_phase != PHASE_DRAGGING) return;
-    int idx = (s_active_player_idx >= 0) ? s_active_player_idx : s_inspect_idx;
-    if (idx < 0) return;
     Unit *u = &s_units[idx];
     if (!u->alive) return;
-    int ts = tile_px();
-    int gx = grid_x();
-    int gy = grid_y();
     int cells_col[MAP_COLS + MAP_ROWS + ROGUE_PATH_MAX];
     int cells_row[MAP_COLS + MAP_ROWS + ROGUE_PATH_MAX];
     int n = 0;
@@ -2210,9 +2203,35 @@ static void draw_player_previews(void)
         n = compute_rogue_cells(idx, moved, cells_col, cells_row);
         tint = (Color){ 200, 130, 255, 255 };
     }
-    BeginScissorMode(gx, gy, VIEW_COLS * ts, VIEW_ROWS * ts);
     for (int i = 0; i < n; i++)
-        draw_cell_overlay(cells_col[i], cells_row[i], tint, 0, 0.55f);
+        draw_cell_overlay(cells_col[i], cells_row[i], tint, 0, strength);
+}
+
+/* Player attack-preview cells. While dragging, render previews for every
+ * living player unit -- the active drag gets a full-strength overlay and
+ * the other players get a dimmer pass so the user can see what each
+ * teammate would hit from its current cell. When idle, only the
+ * inspected unit (if any) shows a preview. */
+static void draw_player_previews(void)
+{
+    if (s_phase != PHASE_IDLE && s_phase != PHASE_DRAGGING) return;
+    int ts = tile_px();
+    int gx = grid_x();
+    int gy = grid_y();
+    BeginScissorMode(gx, gy, VIEW_COLS * ts, VIEW_ROWS * ts);
+
+    if (s_active_player_idx >= 0) {
+        /* Dim peers first so the active overlay paints on top of them. */
+        for (int i = 0; i < s_unit_count; i++) {
+            if (i == s_active_player_idx) continue;
+            if (!IS_PLAYER_KIND(s_units[i].kind)) continue;
+            draw_one_player_preview(i, 0.22f);
+        }
+        draw_one_player_preview(s_active_player_idx, 0.55f);
+    } else if (s_inspect_idx >= 0) {
+        draw_one_player_preview(s_inspect_idx, 0.55f);
+    }
+
     EndScissorMode();
 }
 
