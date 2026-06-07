@@ -222,6 +222,7 @@ typedef struct {
 static Unit s_units[MAX_UNITS];
 static int  s_unit_count;
 static int  s_active_player_idx;  /* -1 = none being dragged */
+static int  s_inspect_idx;        /* -1 = none being inspected (tap-to-show info) */
 
 /* Villain target lists: one per unit-index, but only villains populate. */
 static int s_villain_tgt_col[MAX_UNITS][MAX_TGTS];
@@ -605,6 +606,7 @@ static bool advance_hero(int new_col, int new_row)
     p->col  = new_col;
     p->row  = new_row;
     p->bump = BUMP_SCALE_PEAK - 1.0f;
+    s_inspect_idx = -1;   /* real drag committed — drop any stale inspect card */
     /* Mirror the active player's position into the legacy hero state so
      * check_scroll_trigger() and other helpers keep working. */
     s_hero_col = new_col;
@@ -1553,12 +1555,15 @@ static void resolve_round(void)
     /* Active player may have just died — drop the drag handle. */
     if (s_active_player_idx >= 0 && !s_units[s_active_player_idx].alive)
         s_active_player_idx = -1;
+    if (s_inspect_idx >= 0 && !s_units[s_inspect_idx].alive)
+        s_inspect_idx = -1;
 }
 
 static void end_turn(void)
 {
     s_is_dragging       = false;
     s_active_player_idx = -1;
+    s_inspect_idx       = -1;
     s_flash_count       = 0;
     resolve_round();
     s_phase      = PHASE_SCANNING;
@@ -1654,9 +1659,27 @@ static void on_move(Vector2 pos)
 static void on_up(Vector2 pos)
 {
     if (s_is_dragging) {
+        /* Detect a tap (touch-down on a player, release without moving):
+         * open the unit's info card instead of consuming the turn. */
+        int idx = s_active_player_idx;
+        bool tap = (idx >= 0)
+                && s_units[idx].col == s_units[idx].pre_drag_col
+                && s_units[idx].row == s_units[idx].pre_drag_row;
+        if (tap) {
+            s_inspect_idx = (s_inspect_idx == idx) ? -1 : idx;
+            s_is_dragging       = false;
+            s_active_player_idx = -1;
+            s_phase             = PHASE_IDLE;
+            s_turn_timer        = TURN_SECS;
+            s_trail_len         = 0;
+            return;
+        }
         end_turn();
         return;
     }
+
+    /* Tap on empty space dismisses the inspect card. */
+    if (s_inspect_idx >= 0) s_inspect_idx = -1;
 
     /* HUD tab toggle */
     if (CheckCollisionPointRec(pos, hud_tab_rect())) {
@@ -2159,12 +2182,14 @@ static void draw_threats(void)
     EndScissorMode();
 }
 
-/* Player attack-preview cells for the actively-dragged player unit. */
+/* Player attack-preview cells for the actively-dragged player unit, or
+ * (when idle) for the currently-inspected unit so the user can see where
+ * each class hits before committing. */
 static void draw_player_previews(void)
 {
     if (s_phase != PHASE_IDLE && s_phase != PHASE_DRAGGING) return;
-    if (s_active_player_idx < 0) return;
-    int idx = s_active_player_idx;
+    int idx = (s_active_player_idx >= 0) ? s_active_player_idx : s_inspect_idx;
+    if (idx < 0) return;
     Unit *u = &s_units[idx];
     if (!u->alive) return;
     int ts = tile_px();
@@ -2189,6 +2214,95 @@ static void draw_player_previews(void)
     for (int i = 0; i < n; i++)
         draw_cell_overlay(cells_col[i], cells_row[i], tint, 0, 0.55f);
     EndScissorMode();
+}
+
+/* Info card for the inspected player unit: class name, HP, and a short
+ * description of how this class attacks. Tiles the unit currently
+ * threatens are already highlighted by draw_player_previews(). */
+static void draw_inspect_card(void)
+{
+    if (s_inspect_idx < 0) return;
+    Unit *u = &s_units[s_inspect_idx];
+    if (!u->alive) return;
+
+    const char *name = "";
+    Color tint = WHITE;
+    const char *line1 = "";
+    const char *line2 = "";
+    const char *line3 = "";
+    switch (u->kind) {
+    case UNIT_BRUTE:
+        name  = "Brute";
+        tint  = (Color){ 130, 180, 255, 255 };
+        line1 = "Attack: 4 adjacent tiles (only after moving).";
+        line2 = "Damage: 4 to highest-HP target, 2 to others.";
+        line3 = "Tough frontline -- soak hits, lead the charge.";
+        break;
+    case UNIT_ROGUE:
+        name  = "Rogue";
+        tint  = (Color){ 200, 130, 255, 255 };
+        line1 = "Attack: every tile dragged through (or 4 adjacent if stationary).";
+        line2 = "Damage: 2 each. Executes any enemy below the hit-count.";
+        line3 = "Reward for long, branching drags through clusters.";
+        break;
+    case UNIT_MAGE:
+        name  = "Mage";
+        tint  = (Color){ 255, 180,  90, 255 };
+        line1 = "Attack: full row + column, skipping self and 4 adjacent (after moving).";
+        line2 = "Damage: X to each target, where X is the number of enemies hit.";
+        line3 = "Fragile -- great at culling crowded lanes.";
+        break;
+    default:
+        return;
+    }
+
+    int sw  = GetScreenWidth();
+    int sh  = GetScreenHeight();
+    int pad = sw / 36; if (pad < 8) pad = 8;
+    int fs_title = sh / 28; if (fs_title < 18) fs_title = 18;
+    int fs_body  = sh / 40; if (fs_body  < 14) fs_body  = 14;
+
+    int line_h = fs_body * 130 / 100;
+    int title_h = fs_title * 140 / 100;
+    int body_h  = line_h * 4; /* HP line + 3 description lines */
+    int card_h  = title_h + body_h + pad * 2;
+
+    int max_w = MeasureText(name, fs_title);
+    int w1 = MeasureText(line1, fs_body); if (w1 > max_w) max_w = w1;
+    int w2 = MeasureText(line2, fs_body); if (w2 > max_w) max_w = w2;
+    int w3 = MeasureText(line3, fs_body); if (w3 > max_w) max_w = w3;
+    int card_w  = max_w + pad * 2;
+    if (card_w > sw - pad * 2) card_w = sw - pad * 2;
+
+    /* Place card just above the HUD tab, centered horizontally. */
+    int hud_top = sh - sh * 6 / 100 - sh * 7 / 100 - nav_btn_size() - card_h - pad;
+    if (hud_top < pad) hud_top = pad;
+    int x = (sw - card_w) / 2;
+    int y = hud_top;
+
+    Rectangle r = { (float)x, (float)y, (float)card_w, (float)card_h };
+    DrawRectangleRec(r, (Color){ 8, 8, 12, 235 });
+    DrawRectangleLinesEx(r, 2.0f, tint);
+
+    /* Title line: "Brute   HP 13/13" */
+    char hp_buf[32];
+    snprintf(hp_buf, sizeof(hp_buf), "HP %d/%d", u->hp, u->max_hp);
+    int hp_w = MeasureText(hp_buf, fs_title);
+    int ty = y + pad;
+    DrawText(name, x + pad, ty, fs_title, tint);
+    Color hp_c = (u->hp > u->max_hp * 6 / 10) ? (Color){ 150, 240, 150, 240 }
+               : (u->hp > u->max_hp * 3 / 10) ? (Color){ 240, 220, 110, 240 }
+               :                                (Color){ 240, 110, 110, 240 };
+    DrawText(hp_buf, x + card_w - pad - hp_w, ty, fs_title, hp_c);
+
+    int by = ty + title_h;
+    Color body_c = (Color){ 210, 215, 225, 235 };
+    Color hint_c = (Color){ 160, 165, 180, 220 };
+    DrawText(line1, x + pad, by + line_h * 0, fs_body, body_c);
+    DrawText(line2, x + pad, by + line_h * 1, fs_body, body_c);
+    DrawText(line3, x + pad, by + line_h * 2, fs_body, hint_c);
+    DrawText("Tap unit again or anywhere else to close.",
+             x + pad, by + line_h * 3, fs_body, hint_c);
 }
 
 /* Brief flash on the just-resolved attack target cells. Re-uses
@@ -2689,6 +2803,7 @@ static void RealmWalkInit(void)
     s_player_lost = false;
     s_unit_count  = 0;
     s_active_player_idx = -1;
+    s_inspect_idx       = -1;
     s_wave_index  = 1;
 
     /* Compact spawn: 3 player units on the left, 2 villains on the right. */
@@ -2997,6 +3112,7 @@ static void RealmWalkDraw(void)
     draw_nav_buttons();
     draw_hud_status();
     draw_timer_bar();
+    draw_inspect_card();
     draw_end_game();
 }
 
