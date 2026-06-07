@@ -106,10 +106,32 @@ typedef struct {
 
 typedef enum {
     UNIT_NONE = 0,
-    UNIT_PLAYER,
-    UNIT_ENEMY,
-    UNIT_PROTECTED,
+    UNIT_BRUTE,
+    UNIT_ROGUE,
+    UNIT_MAGE,
+    UNIT_VILLAIN_STALKER,
+    UNIT_VILLAIN_SWARMER,
+    UNIT_MINION,
 } UnitKind;
+
+#define IS_PLAYER_KIND(k)  ((k) == UNIT_BRUTE || (k) == UNIT_ROGUE || (k) == UNIT_MAGE)
+#define IS_VILLAIN_KIND(k) ((k) == UNIT_VILLAIN_STALKER || (k) == UNIT_VILLAIN_SWARMER)
+#define IS_ENEMY_KIND(k)   (IS_VILLAIN_KIND(k) || (k) == UNIT_MINION)
+
+#define HP_BRUTE 13
+#define HP_ROGUE 11
+#define HP_MAGE  10
+#define HP_VILLAIN_MIN 15
+#define HP_VILLAIN_MAX 25
+#define HP_MINION 2
+#define DMG_STALKER 6
+#define DMG_SWARMER 2
+#define MINION_HP_BUFF  5
+#define MINION_DMG_BUFF 1
+#define OBSTACLE_DENSITY_PCT 15
+#define MINIONS_PER_TURN     2
+
+#define MAX_TGTS 8
 
 #define MAX_STRUCTURES 32
 
@@ -184,7 +206,14 @@ typedef struct {
     UnitKind kind;
     bool     alive;
     int      col, row;
-    int      tele_dc, tele_dr;
+    int      pre_drag_col, pre_drag_row;  /* snapshot at on_down (player only) */
+    int      hp, max_hp;
+    int      damage_bonus;                /* villains only */
+    /* minion-only buff record */
+    int      buff_villain_idx;            /* -1 if none */
+    int      buff_kind;                   /* 0 = +damage, 1 = +HP */
+    int      buff_amount;
+    /* rendering */
     float    vis_col, vis_row;
     float    bump;
 } Unit;
@@ -193,6 +222,23 @@ typedef struct {
 static Unit s_units[MAX_UNITS];
 static int  s_unit_count;
 static int  s_active_player_idx;  /* -1 = none being dragged */
+
+/* Villain target lists: one per unit-index, but only villains populate. */
+static int s_villain_tgt_col[MAX_UNITS][MAX_TGTS];
+static int s_villain_tgt_row[MAX_UNITS][MAX_TGTS];
+static int s_villain_tgt_n[MAX_UNITS];
+
+/* Wave counter (1, 2, ...) — incremented when both villains die. */
+static int s_wave_index;
+
+/* Obstacles: impassable cells generated at game start. */
+static bool s_obstacle[MAP_ROWS][MAP_COLS];
+
+/* Rogue path tracking (cells the rogue traversed in the current drag). */
+#define ROGUE_PATH_MAX (MAP_COLS + MAP_ROWS)
+static int s_rogue_path_col[ROGUE_PATH_MAX];
+static int s_rogue_path_row[ROGUE_PATH_MAX];
+static int s_rogue_path_n;
 
 /* Legacy mirror of the active player's logical position. Kept in sync
  * during drag so check_scroll_trigger and a few other helpers continue
@@ -205,15 +251,19 @@ static float s_resolve_flash;     /* counts down to flash attack hits   */
 #define RESOLVE_FLASH_SECS 0.45f
 
 /* Latest resolved attack targets (for the post-drag flash). */
-typedef struct { int col, row; bool by_player; } AttackHit;
-#define MAX_ATTACKS MAX_UNITS
+typedef struct { int col, row; int damage; bool by_player; } AttackHit;
+#define MAX_ATTACKS 64
 static AttackHit s_last_attacks[MAX_ATTACKS];
 static int       s_last_attack_count;
 
 /* forward decls for round helpers (defined below end_turn) */
 static void enemy_plan_turn(void);
-static void player_roll_random_telegraph(void);
 static int  unit_at(int col, int row);    /* -1 = none */
+static bool cell_is_walkable(int col, int row);
+static void damage_unit(int idx, int dmg);
+static void spawn_minions(void);
+static void spawn_villains_for_wave(void);
+static bool wave_clear_if_done(void);
 
 /* -------------------------------------------------------------- data tables */
 
@@ -503,6 +553,9 @@ static bool advance_hero(int new_col, int new_row)
     if (new_row < 0 || new_row >= MAP_ROWS) return false;
     if (new_col == p->col && new_row == p->row) return false;
 
+    /* Obstacles block movement. */
+    if (!cell_is_walkable(new_col, new_row)) return false;
+
     /* If destination is occupied by another living unit, swap with it: the
      * displaced unit goes to where the player was, terrain at both cells
      * stays put. Lets the player reposition the enemy (and protected) tile
@@ -556,6 +609,13 @@ static bool advance_hero(int new_col, int new_row)
      * check_scroll_trigger() and other helpers keep working. */
     s_hero_col = new_col;
     s_hero_row = new_row;
+
+    /* Track the rogue's path so its attack hits everywhere it stepped. */
+    if (p->kind == UNIT_ROGUE && s_rogue_path_n < ROGUE_PATH_MAX) {
+        s_rogue_path_col[s_rogue_path_n] = new_col;
+        s_rogue_path_row[s_rogue_path_n] = new_row;
+        s_rogue_path_n++;
+    }
 
     return check_scroll_trigger();
 }
@@ -922,152 +982,573 @@ static void unit_swap_to_terrain(int unit_idx, int new_col, int new_row)
     u->bump = BUMP_SCALE_PEAK - 1.0f;
 }
 
-static void player_roll_random_telegraph(void)
+/* ------------------------------------------------------ unit / spawn helpers */
+
+static int class_max_hp(UnitKind k)
 {
-    static const int dxs[4] = {  1, -1,  0,  0 };
-    static const int dys[4] = {  0,  0,  1, -1 };
-    for (int i = 0; i < s_unit_count; i++) {
-        Unit *u = &s_units[i];
-        if (!u->alive || u->kind != UNIT_PLAYER) continue;
-        int d = GetRandomValue(0, 3);
-        u->tele_dc = dxs[d];
-        u->tele_dr = dys[d];
+    switch (k) {
+    case UNIT_BRUTE:           return HP_BRUTE;
+    case UNIT_ROGUE:           return HP_ROGUE;
+    case UNIT_MAGE:            return HP_MAGE;
+    case UNIT_VILLAIN_STALKER:
+    case UNIT_VILLAIN_SWARMER: return GetRandomValue(HP_VILLAIN_MIN, HP_VILLAIN_MAX);
+    case UNIT_MINION:          return HP_MINION;
+    default:                   return 1;
     }
 }
 
-/* Plan one enemy's move + telegraph. Other enemies that already moved
- * this round occupy their new cells, so each plan accounts for them. */
-static void enemy_plan_one(int enemy_idx)
+static void spawn_unit(UnitKind kind, int col, int row)
 {
-    Unit *e = &s_units[enemy_idx];
-    if (!e->alive || e->kind != UNIT_ENEMY) return;
+    if (s_unit_count >= MAX_UNITS) return;
+    if (col < 0 || col >= MAP_COLS || row < 0 || row >= MAP_ROWS) return;
+    if (unit_at(col, row) >= 0) return;
+    Unit *u = &s_units[s_unit_count++];
+    u->kind             = kind;
+    u->alive            = true;
+    u->col              = col;
+    u->row              = row;
+    u->pre_drag_col     = col;
+    u->pre_drag_row     = row;
+    u->max_hp           = class_max_hp(kind);
+    u->hp               = u->max_hp;
+    u->damage_bonus     = 0;
+    u->buff_villain_idx = -1;
+    u->buff_kind        = 0;
+    u->buff_amount      = 0;
+    u->vis_col          = (float)col;
+    u->vis_row          = (float)row;
+    u->bump             = 0.0f;
+}
 
-    static const int dxs[4] = {  1, -1,  0,  0 };
-    static const int dys[4] = {  0,  0,  1, -1 };
+/* ----------------------------------------------------------- map / walkable */
 
-    int best_col = -1, best_row = -1;
-    int best_dist = INT_MAX;
-    int best_tgt_col = 0, best_tgt_row = 0;
+static bool cell_is_walkable(int col, int row)
+{
+    if (col < 0 || col >= MAP_COLS) return false;
+    if (row < 0 || row >= MAP_ROWS) return false;
+    return !s_obstacle[row][col];
+}
 
-    /* Iterate all living player/protected targets. */
-    for (int ti = 0; ti < s_unit_count; ti++) {
-        Unit *t = &s_units[ti];
-        if (!t->alive) continue;
-        if (t->kind != UNIT_PLAYER && t->kind != UNIT_PROTECTED) continue;
-        for (int d = 0; d < 4; d++) {
-            int nc = t->col + dxs[d];
-            int nr = t->row + dys[d];
-            if (nc < 0 || nc >= MAP_COLS || nr < 0 || nr >= MAP_ROWS) continue;
-            int occupant = unit_at(nc, nr);
-            if (occupant >= 0 && occupant != enemy_idx) continue;
-            int dist = abs(nc - e->col) + abs(nr - e->row);
-            if (dist < best_dist) {
-                best_dist    = dist;
-                best_col     = nc;
-                best_row     = nr;
-                best_tgt_col = t->col;
-                best_tgt_row = t->row;
+/* Generate the obstacle layout: ~15% scatter plus a handful of small
+ * rectangle "wall" blobs for visual variety. Cells in `keep_clear` are
+ * forced walkable so initial spawns aren't buried. */
+static void generate_obstacles(const int *keep_clear_col, const int *keep_clear_row, int keep_n)
+{
+    /* uniform scatter */
+    for (int r = 0; r < MAP_ROWS; r++)
+        for (int c = 0; c < MAP_COLS; c++)
+            s_obstacle[r][c] = (GetRandomValue(0, 99) < OBSTACLE_DENSITY_PCT);
+
+    /* a few small wall blobs (2x1, 1x2, 2x2) */
+    int blob_count = 5;
+    for (int b = 0; b < blob_count; b++) {
+        int sw = GetRandomValue(1, 2);
+        int sh = GetRandomValue(1, 2);
+        int c0 = GetRandomValue(0, MAP_COLS - sw);
+        int r0 = GetRandomValue(0, MAP_ROWS - sh);
+        for (int rr = 0; rr < sh; rr++)
+            for (int cc = 0; cc < sw; cc++)
+                s_obstacle[r0 + rr][c0 + cc] = true;
+    }
+
+    /* clear the spawn cells (and a 1-tile breathing border around them) */
+    for (int i = 0; i < keep_n; i++) {
+        int c = keep_clear_col[i];
+        int r = keep_clear_row[i];
+        for (int dr = -1; dr <= 1; dr++)
+            for (int dc = -1; dc <= 1; dc++) {
+                int nc = c + dc, nr = r + dr;
+                if (nc < 0 || nc >= MAP_COLS || nr < 0 || nr >= MAP_ROWS) continue;
+                s_obstacle[nr][nc] = false;
+            }
+    }
+}
+
+/* --------------------------------------------------------- attack targeting */
+
+/* All living units other than `self_idx` whose (col, row) match one of the
+ * cells in `cells_col`/`cells_row` (n entries). Returns count, fills `out`. */
+static int collect_units_on_cells(int self_idx,
+                                   const int *cells_col, const int *cells_row, int n,
+                                   int *out)
+{
+    int found = 0;
+    for (int i = 0; i < s_unit_count && found < MAX_UNITS; i++) {
+        if (i == self_idx) continue;
+        Unit *u = &s_units[i];
+        if (!u->alive) continue;
+        for (int k = 0; k < n; k++) {
+            if (u->col == cells_col[k] && u->row == cells_row[k]) {
+                out[found++] = i;
+                break;
             }
         }
     }
+    return found;
+}
 
-    if (best_col >= 0) {
-        unit_swap_to_terrain(enemy_idx, best_col, best_row);
-        e->tele_dc = best_tgt_col - e->col;
-        e->tele_dr = best_tgt_row - e->row;
-        return;
+static int compute_brute_cells(int idx, int *col_out, int *row_out)
+{
+    Unit *u = &s_units[idx];
+    static const int dxs[4] = {  1, -1, 0,  0 };
+    static const int dys[4] = {  0,  0, 1, -1 };
+    int n = 0;
+    for (int d = 0; d < 4; d++) {
+        int c = u->col + dxs[d], r = u->row + dys[d];
+        if (c < 0 || c >= MAP_COLS || r < 0 || r >= MAP_ROWS) continue;
+        col_out[n] = c; row_out[n] = r; n++;
+    }
+    return n;
+}
+
+static int compute_mage_cells(int idx, int *col_out, int *row_out)
+{
+    Unit *u = &s_units[idx];
+    int n = 0;
+    for (int c = 0; c < MAP_COLS; c++) {
+        if (c == u->col) continue;
+        if (abs(c - u->col) == 1) continue;   /* skip the adjacent N/E/S/W */
+        col_out[n] = c; row_out[n] = u->row; n++;
+    }
+    for (int r = 0; r < MAP_ROWS; r++) {
+        if (r == u->row) continue;
+        if (abs(r - u->row) == 1) continue;
+        col_out[n] = u->col; row_out[n] = r; n++;
+    }
+    return n;
+}
+
+/* Rogue: if moved, the recorded drag path; otherwise 4-adjacent. */
+static int compute_rogue_cells(int idx, bool moved, int *col_out, int *row_out)
+{
+    if (moved && s_rogue_path_n > 0) {
+        int n = s_rogue_path_n;
+        if (n > MAX_UNITS) n = MAX_UNITS;
+        for (int i = 0; i < n; i++) {
+            col_out[i] = s_rogue_path_col[i];
+            row_out[i] = s_rogue_path_row[i];
+        }
+        return n;
+    }
+    return compute_brute_cells(idx, col_out, row_out);
+}
+
+/* ----------------------------------------------------------- damage / kills */
+
+/* Unwind a minion's buff on its target villain (if both alive / valid). */
+static void unwind_minion_buff(int minion_idx)
+{
+    Unit *m = &s_units[minion_idx];
+    if (m->buff_villain_idx < 0) return;
+    int vi = m->buff_villain_idx;
+    if (vi < 0 || vi >= s_unit_count) return;
+    Unit *v = &s_units[vi];
+    if (m->buff_kind == 0) {
+        /* +damage buff */
+        v->damage_bonus -= m->buff_amount;
+        if (v->damage_bonus < 0) v->damage_bonus = 0;
+    } else {
+        /* +HP buff */
+        v->max_hp -= m->buff_amount;
+        if (v->max_hp < 1) v->max_hp = 1;
+        if (v->hp > v->max_hp) v->hp = v->max_hp;
+    }
+    m->buff_villain_idx = -1;
+}
+
+static void damage_unit(int idx, int dmg)
+{
+    if (idx < 0 || idx >= s_unit_count) return;
+    Unit *u = &s_units[idx];
+    if (!u->alive) return;
+    u->hp -= dmg;
+    if (u->hp <= 0) {
+        u->hp    = 0;
+        u->alive = false;
+        if (u->kind == UNIT_MINION) unwind_minion_buff(idx);
+    }
+}
+
+/* Resolve all player attacks (Brute → Rogue → Mage) and apply damage. */
+static void resolve_player_attacks(void)
+{
+    for (int pass = 0; pass < 3; pass++) {
+        UnitKind want = (pass == 0) ? UNIT_BRUTE
+                        : (pass == 1) ? UNIT_ROGUE
+                                      : UNIT_MAGE;
+        for (int i = 0; i < s_unit_count; i++) {
+            Unit *u = &s_units[i];
+            if (!u->alive) continue;
+            if (u->kind != want) continue;
+
+            bool moved = (u->col != u->pre_drag_col || u->row != u->pre_drag_row);
+
+            /* Rogue always attacks. Brute / Mage only if moved this turn. */
+            if (want != UNIT_ROGUE && !moved) continue;
+
+            int cells_col[MAP_COLS + MAP_ROWS + ROGUE_PATH_MAX];
+            int cells_row[MAP_COLS + MAP_ROWS + ROGUE_PATH_MAX];
+            int n = 0;
+            if (want == UNIT_BRUTE) n = compute_brute_cells(i, cells_col, cells_row);
+            else if (want == UNIT_MAGE)  n = compute_mage_cells(i, cells_col, cells_row);
+            else                         n = compute_rogue_cells(i, moved, cells_col, cells_row);
+
+            int targets[MAX_UNITS];
+            int tn = collect_units_on_cells(i, cells_col, cells_row, n, targets);
+            if (tn == 0) continue;
+
+            if (want == UNIT_BRUTE) {
+                /* 4 to single highest-HP target, 2 to all others. */
+                int max_hp = -1, max_idx = -1;
+                for (int k = 0; k < tn; k++) {
+                    if (s_units[targets[k]].hp > max_hp) {
+                        max_hp  = s_units[targets[k]].hp;
+                        max_idx = targets[k];
+                    }
+                }
+                for (int k = 0; k < tn; k++) {
+                    int dmg = (targets[k] == max_idx) ? 4 : 2;
+                    damage_unit(targets[k], dmg);
+                    if (s_last_attack_count < MAX_ATTACKS) {
+                        s_last_attacks[s_last_attack_count++] = (AttackHit){
+                            .col = s_units[targets[k]].col,
+                            .row = s_units[targets[k]].row,
+                            .damage = dmg,
+                            .by_player = true,
+                        };
+                    }
+                }
+            } else if (want == UNIT_MAGE) {
+                int dmg = tn;
+                for (int k = 0; k < tn; k++) {
+                    int cc = s_units[targets[k]].col;
+                    int rr = s_units[targets[k]].row;
+                    damage_unit(targets[k], dmg);
+                    if (s_last_attack_count < MAX_ATTACKS) {
+                        s_last_attacks[s_last_attack_count++] = (AttackHit){
+                            .col = cc, .row = rr, .damage = dmg, .by_player = true,
+                        };
+                    }
+                }
+            } else { /* ROGUE */
+                /* 2 to each target. Then execute any *enemy* with HP <
+                 * (count of enemy targets). Count enemies pre-execute on
+                 * the snapshot, then apply executes. */
+                int enemy_count = 0;
+                for (int k = 0; k < tn; k++)
+                    if (IS_ENEMY_KIND(s_units[targets[k]].kind)) enemy_count++;
+                for (int k = 0; k < tn; k++) {
+                    int cc = s_units[targets[k]].col;
+                    int rr = s_units[targets[k]].row;
+                    damage_unit(targets[k], 2);
+                    if (s_last_attack_count < MAX_ATTACKS) {
+                        s_last_attacks[s_last_attack_count++] = (AttackHit){
+                            .col = cc, .row = rr, .damage = 2, .by_player = true,
+                        };
+                    }
+                }
+                /* Execute pass: kill living enemy targets with hp < enemy_count. */
+                for (int k = 0; k < tn; k++) {
+                    Unit *t = &s_units[targets[k]];
+                    if (!t->alive) continue;
+                    if (!IS_ENEMY_KIND(t->kind)) continue;
+                    if (t->hp < enemy_count) {
+                        damage_unit(targets[k], t->hp);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* ------------------------------------------------------- villain attacks */
+
+/* Closest living player unit to (col, row). -1 if none. */
+static int closest_player_to(int col, int row)
+{
+    int best = -1, best_dist = INT_MAX;
+    for (int i = 0; i < s_unit_count; i++) {
+        Unit *u = &s_units[i];
+        if (!u->alive) continue;
+        if (!IS_PLAYER_KIND(u->kind)) continue;
+        int d = abs(u->col - col) + abs(u->row - row);
+        if (d < best_dist) { best_dist = d; best = i; }
+    }
+    return best;
+}
+
+static int random_living_player(void)
+{
+    int n = count_living(UNIT_BRUTE) + count_living(UNIT_ROGUE) + count_living(UNIT_MAGE);
+    if (n == 0) return -1;
+    int pick = GetRandomValue(0, n - 1);
+    for (int i = 0; i < s_unit_count; i++) {
+        Unit *u = &s_units[i];
+        if (!u->alive) continue;
+        if (!IS_PLAYER_KIND(u->kind)) continue;
+        if (pick == 0) return i;
+        pick--;
+    }
+    return -1;
+}
+
+static int random_living_villain(void)
+{
+    int n = count_living(UNIT_VILLAIN_STALKER) + count_living(UNIT_VILLAIN_SWARMER);
+    if (n == 0) return -1;
+    int pick = GetRandomValue(0, n - 1);
+    for (int i = 0; i < s_unit_count; i++) {
+        Unit *u = &s_units[i];
+        if (!u->alive) continue;
+        if (!IS_VILLAIN_KIND(u->kind)) continue;
+        if (pick == 0) return i;
+        pick--;
+    }
+    return -1;
+}
+
+static void resolve_villain_attacks(void)
+{
+    for (int i = 0; i < s_unit_count; i++) {
+        Unit *v = &s_units[i];
+        if (!v->alive) continue;
+        if (!IS_VILLAIN_KIND(v->kind)) continue;
+        int n = s_villain_tgt_n[i];
+        int dmg = (v->kind == UNIT_VILLAIN_STALKER ? DMG_STALKER : DMG_SWARMER) + v->damage_bonus;
+        for (int k = 0; k < n; k++) {
+            int tc = s_villain_tgt_col[i][k];
+            int tr = s_villain_tgt_row[i][k];
+            int tgt = unit_at(tc, tr);
+            if (tgt >= 0) damage_unit(tgt, dmg);
+            if (s_last_attack_count < MAX_ATTACKS) {
+                s_last_attacks[s_last_attack_count++] = (AttackHit){
+                    .col = tc, .row = tr, .damage = dmg, .by_player = false,
+                };
+            }
+        }
+    }
+}
+
+/* --------------------------------------------------- minion spawn + buffs */
+
+static void spawn_minions(void)
+{
+    for (int n = 0; n < MINIONS_PER_TURN; n++) {
+        /* pick a random empty walkable cell */
+        int c = -1, r = -1;
+        for (int tries = 0; tries < 200; tries++) {
+            int cc = GetRandomValue(0, MAP_COLS - 1);
+            int rr = GetRandomValue(0, MAP_ROWS - 1);
+            if (!cell_is_walkable(cc, rr)) continue;
+            if (unit_at(cc, rr) >= 0) continue;
+            c = cc; r = rr; break;
+        }
+        if (c < 0) return;
+
+        int before = s_unit_count;
+        spawn_unit(UNIT_MINION, c, r);
+        if (s_unit_count == before) return;
+        int mi = s_unit_count - 1;
+        Unit *m = &s_units[mi];
+
+        /* Pick a random villain to buff. */
+        int vi = random_living_villain();
+        if (vi < 0) {
+            m->buff_villain_idx = -1;
+            continue;
+        }
+        Unit *v = &s_units[vi];
+        int kind = GetRandomValue(0, 1);   /* 0 = +damage, 1 = +HP */
+        m->buff_villain_idx = vi;
+        m->buff_kind        = kind;
+        if (kind == 0) {
+            m->buff_amount = MINION_DMG_BUFF;
+            v->damage_bonus += MINION_DMG_BUFF;
+        } else {
+            m->buff_amount = MINION_HP_BUFF;
+            v->max_hp += MINION_HP_BUFF;
+            v->hp     += MINION_HP_BUFF;
+        }
+    }
+}
+
+/* ---------------------------------------------------------- villain planning */
+
+static void enemy_plan_one(int v_idx)
+{
+    Unit *e = &s_units[v_idx];
+    if (!e->alive) return;
+    if (!IS_VILLAIN_KIND(e->kind)) return;
+
+    static const int dxs[4] = {  1, -1, 0,  0 };
+    static const int dys[4] = {  0,  0, 1, -1 };
+
+    /* Movement: try to swap onto a walkable tile adjacent to the relevant
+     * player. For Stalker this is the closest player; for Swarmer use a
+     * random living player just for positioning. */
+    int focus_idx = (e->kind == UNIT_VILLAIN_STALKER)
+                       ? closest_player_to(e->col, e->row)
+                       : random_living_player();
+    if (focus_idx >= 0) {
+        Unit *t = &s_units[focus_idx];
+        int best_col = -1, best_row = -1, best_dist = INT_MAX;
+        for (int d = 0; d < 4; d++) {
+            int nc = t->col + dxs[d], nr = t->row + dys[d];
+            if (!cell_is_walkable(nc, nr)) continue;
+            int occ = unit_at(nc, nr);
+            if (occ >= 0 && occ != v_idx) continue;
+            int dist = abs(nc - e->col) + abs(nr - e->row);
+            if (dist < best_dist) {
+                best_dist = dist; best_col = nc; best_row = nr;
+            }
+        }
+        if (best_col >= 0)
+            unit_swap_to_terrain(v_idx, best_col, best_row);
     }
 
-    /* Fallback: walled in. Hop to a random free cell + random direction. */
-    for (int tries = 0; tries < 100; tries++) {
-        int nc = GetRandomValue(0, MAP_COLS - 1);
-        int nr = GetRandomValue(0, MAP_ROWS - 1);
-        int occupant = unit_at(nc, nr);
-        if (occupant >= 0 && occupant != enemy_idx) continue;
-        unit_swap_to_terrain(enemy_idx, nc, nr);
-        break;
+    /* Fallback hop: walled in (no focus or no valid adjacency) — random walk. */
+    if (focus_idx < 0) {
+        for (int tries = 0; tries < 100; tries++) {
+            int nc = GetRandomValue(0, MAP_COLS - 1);
+            int nr = GetRandomValue(0, MAP_ROWS - 1);
+            if (!cell_is_walkable(nc, nr)) continue;
+            int occ = unit_at(nc, nr);
+            if (occ >= 0 && occ != v_idx) continue;
+            unit_swap_to_terrain(v_idx, nc, nr);
+            break;
+        }
     }
-    int d = GetRandomValue(0, 3);
-    e->tele_dc = dxs[d];
-    e->tele_dr = dys[d];
+
+    /* Telegraph: write target list for next round. */
+    s_villain_tgt_n[v_idx] = 0;
+    if (e->kind == UNIT_VILLAIN_STALKER) {
+        int tgt = closest_player_to(e->col, e->row);
+        if (tgt >= 0) {
+            s_villain_tgt_col[v_idx][0] = s_units[tgt].col;
+            s_villain_tgt_row[v_idx][0] = s_units[tgt].row;
+            s_villain_tgt_n[v_idx]      = 1;
+        }
+    } else {
+        int n = 0;
+        for (int i = 0; i < s_unit_count && n < MAX_TGTS; i++) {
+            Unit *u = &s_units[i];
+            if (!u->alive || !IS_PLAYER_KIND(u->kind)) continue;
+            s_villain_tgt_col[v_idx][n] = u->col;
+            s_villain_tgt_row[v_idx][n] = u->row;
+            n++;
+        }
+        s_villain_tgt_n[v_idx] = n;
+    }
 }
 
 static void enemy_plan_turn(void)
 {
-    for (int i = 0; i < s_unit_count; i++) {
-        if (s_units[i].alive && s_units[i].kind == UNIT_ENEMY)
+    for (int i = 0; i < s_unit_count; i++)
+        if (s_units[i].alive && IS_VILLAIN_KIND(s_units[i].kind))
             enemy_plan_one(i);
+}
+
+/* ----------------------------------------------------- wave clear / spawn */
+
+static void clear_living_minions_and_buffs(void)
+{
+    for (int i = 0; i < s_unit_count; i++) {
+        Unit *m = &s_units[i];
+        if (!m->alive) continue;
+        if (m->kind != UNIT_MINION) continue;
+        /* Unwind buff (no-op if villain already dead). */
+        unwind_minion_buff(i);
+        m->alive = false;
+        m->hp    = 0;
     }
 }
 
-/* Resolve simultaneous attacks: snapshot each living unit's telegraph
- * target, then apply destruction at end. Friendly fire is intentional. */
+static void recharge_players(void)
+{
+    for (int i = 0; i < s_unit_count; i++) {
+        Unit *u = &s_units[i];
+        if (!u->alive) continue;
+        if (!IS_PLAYER_KIND(u->kind)) continue;
+        u->hp = u->max_hp;
+    }
+}
+
+/* Pick the closest walkable empty cell to (col, row), or return false. */
+static bool nearest_open_cell(int col, int row, int *out_c, int *out_r)
+{
+    for (int radius = 0; radius < 6; radius++) {
+        for (int dr = -radius; dr <= radius; dr++) {
+            for (int dc = -radius; dc <= radius; dc++) {
+                if (abs(dc) != radius && abs(dr) != radius) continue;  /* shell only */
+                int nc = col + dc, nr = row + dr;
+                if (!cell_is_walkable(nc, nr)) continue;
+                if (unit_at(nc, nr) >= 0) continue;
+                *out_c = nc; *out_r = nr;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static void spawn_villains_for_wave(void)
+{
+    int cx = MAP_COLS / 2;
+    int cy = MAP_ROWS / 2;
+    int c, r;
+    if (nearest_open_cell(cx + 2, cy,     &c, &r)) spawn_unit(UNIT_VILLAIN_STALKER, c, r);
+    if (nearest_open_cell(cx + 2, cy + 1, &c, &r)) spawn_unit(UNIT_VILLAIN_SWARMER, c, r);
+}
+
+static bool wave_clear_if_done(void)
+{
+    if (count_living(UNIT_VILLAIN_STALKER) + count_living(UNIT_VILLAIN_SWARMER) > 0)
+        return false;
+    s_wave_index++;
+    recharge_players();
+    clear_living_minions_and_buffs();
+    spawn_villains_for_wave();
+    return true;
+}
+
+/* ---------------------------------------------------------- round resolve */
+
 static void resolve_round(void)
 {
     s_last_attack_count = 0;
 
-    /* Snapshot: list (target_col, target_row, who_attacked_side) for each
-     * living unit with a telegraph. */
-    int tgt_col[MAX_UNITS], tgt_row[MAX_UNITS];
-    bool tgt_by_player[MAX_UNITS];
-    int  atk_count = 0;
-    for (int i = 0; i < s_unit_count; i++) {
-        Unit *u = &s_units[i];
-        if (!u->alive) continue;
-        if (u->tele_dc == 0 && u->tele_dr == 0) continue;
-        int tc = u->col + u->tele_dc;
-        int tr = u->row + u->tele_dr;
-        if (tc < 0 || tc >= MAP_COLS || tr < 0 || tr >= MAP_ROWS) continue;
-        tgt_col[atk_count]       = tc;
-        tgt_row[atk_count]       = tr;
-        tgt_by_player[atk_count] = (u->kind == UNIT_PLAYER);
-        atk_count++;
-        if (s_last_attack_count < MAX_ATTACKS) {
-            s_last_attacks[s_last_attack_count++] = (AttackHit){
-                .col = tc, .row = tr, .by_player = (u->kind == UNIT_PLAYER),
-            };
-        }
-    }
-
-    /* Apply deaths: for each snapshotted attack, kill whoever is on the
-     * target cell (friend or foe). Reads positions BEFORE applying so
-     * resolution is simultaneous. */
-    bool kill[MAX_UNITS] = { 0 };
-    for (int a = 0; a < atk_count; a++) {
-        for (int i = 0; i < s_unit_count; i++) {
-            Unit *u = &s_units[i];
-            if (!u->alive) continue;
-            if (u->col == tgt_col[a] && u->row == tgt_row[a]) kill[i] = true;
-        }
-    }
-    for (int i = 0; i < s_unit_count; i++)
-        if (kill[i]) s_units[i].alive = false;
-    (void)tgt_by_player; /* recorded above for the flash colour */
-
+    /* 1. Player attacks. */
+    resolve_player_attacks();
     s_resolve_flash = RESOLVE_FLASH_SECS;
 
-    int alive_enemies   = count_living(UNIT_ENEMY);
-    int alive_players   = count_living(UNIT_PLAYER);
-    int alive_protected = count_living(UNIT_PROTECTED);
+    /* 2. Wave-clear short-circuits the round (no villain swing, no minion spawn). */
+    bool wave_cleared = wave_clear_if_done();
 
-    if (alive_enemies == 0) {
-        s_player_won = true;
-        s_game_over  = true;
-        return;
-    }
-    if (alive_players == 0 || alive_protected == 0) {
-        s_player_lost = true;
-        s_game_over   = true;
-        return;
+    if (!wave_cleared) {
+        /* 3. Villain attacks. */
+        resolve_villain_attacks();
+
+        /* 4. Lose check. */
+        if (count_living(UNIT_BRUTE) + count_living(UNIT_ROGUE) + count_living(UNIT_MAGE) == 0) {
+            s_player_lost = true;
+            s_game_over   = true;
+            return;
+        }
+
+        /* 5. Spawn minions. */
+        spawn_minions();
+    } else {
+        /* Wave-clear edge case: every player dropped to 0 in their own attack
+         * pass (e.g. mage friendly-fired everyone). Still a defeat. */
+        if (count_living(UNIT_BRUTE) + count_living(UNIT_ROGUE) + count_living(UNIT_MAGE) == 0) {
+            s_player_lost = true;
+            s_game_over   = true;
+            return;
+        }
     }
 
-    /* Game continues: clear telegraphs, plan next round. */
-    for (int i = 0; i < s_unit_count; i++) {
-        s_units[i].tele_dc = 0;
-        s_units[i].tele_dr = 0;
-    }
+    /* 6. Plan next round (villain telegraphs). */
     enemy_plan_turn();
-    player_roll_random_telegraph();
 
     /* Active player may have just died — drop the drag handle. */
     if (s_active_player_idx >= 0 && !s_units[s_active_player_idx].alive)
@@ -1085,37 +1566,15 @@ static void end_turn(void)
     s_turn_timer = TURN_SECS;
 }
 
-static void spawn_unit(UnitKind kind, int col, int row)
-{
-    if (s_unit_count >= MAX_UNITS) return;
-    if (col < 0 || col >= MAP_COLS || row < 0 || row >= MAP_ROWS) return;
-    if (unit_at(col, row) >= 0) return;
-    Unit *u = &s_units[s_unit_count++];
-    u->kind    = kind;
-    u->alive   = true;
-    u->col     = col;
-    u->row     = row;
-    u->tele_dc = 0;
-    u->tele_dr = 0;
-    u->vis_col = (float)col;
-    u->vis_row = (float)row;
-    u->bump    = 0.0f;
-}
-
 /* ------------------------------------------------------------- map generation */
 
 static void generate_map(void)
 {
-    /* weights: Plains 30, Forest 25, Mountain 15, City 10, Water 20 */
-    static const int WEIGHTS[TERRAIN_COUNT] = { 30, 25, 15, 10, 20 };
-    static Terrain   LUT[100];
-    int idx = 0;
-    for (int t = 0; t < TERRAIN_COUNT; t++)
-        for (int k = 0; k < WEIGHTS[t]; k++)
-            LUT[idx++] = (Terrain)t;
+    /* No more terrain types — keep s_map zeroed for legacy code that still
+     * indexes it (e.g. dead structure helpers, unit_swap_to_terrain). */
     for (int r = 0; r < MAP_ROWS; r++)
         for (int c = 0; c < MAP_COLS; c++)
-            s_map[r][c] = LUT[GetRandomValue(0, 99)];
+            s_map[r][c] = TERRAIN_PLAINS;
 }
 
 /* ----------------------------------------------------------- input callbacks */
@@ -1129,11 +1588,26 @@ static void on_down(Vector2 pos)
     if (!screen_to_tile(pos, &col, &row)) return;
     int hit = unit_at(col, row);
     if (hit < 0) return;
-    if (s_units[hit].kind != UNIT_PLAYER) return;
+    if (!IS_PLAYER_KIND(s_units[hit].kind)) return;
 
     s_active_player_idx = hit;
     s_hero_col = s_units[hit].col;
     s_hero_row = s_units[hit].row;
+
+    /* Snapshot every unit's pre-drag position so swap-displacement still
+     * counts as 'moved' for attack triggering at resolve time. */
+    for (int i = 0; i < s_unit_count; i++) {
+        s_units[i].pre_drag_col = s_units[i].col;
+        s_units[i].pre_drag_row = s_units[i].row;
+    }
+
+    /* Seed the rogue path with its current cell (so its start counts as a target). */
+    s_rogue_path_n = 0;
+    if (s_units[hit].kind == UNIT_ROGUE) {
+        s_rogue_path_col[s_rogue_path_n] = s_units[hit].col;
+        s_rogue_path_row[s_rogue_path_n] = s_units[hit].row;
+        s_rogue_path_n++;
+    }
 
     s_is_dragging = true;
     s_turn_timer  = TURN_SECS;
@@ -1294,75 +1768,38 @@ static void draw_map_tiles(void)
 
     BeginScissorMode(gx, gy, vc * ts, vr * ts);
 
-    /* Pass 1: draw individual terrain tiles (skip cells that belong to a
-     * structure — those are rendered as one large tile in pass 2).
-     * Expand loop by 1 cell each side to cover fractional viewport lag. */
+    /* Solid neutral fill for the walkable cells; distinct charcoal block for
+     * obstacles. Expand loop by 1 each side for viewport-lerp coverage. */
+    const Color WALK     = (Color){  28,  34,  46, 255 };
+    const Color WALK_EDG = (Color){  60,  72,  92, 220 };
+    const Color BLOCK    = (Color){  60,  18,  18, 255 };
+    const Color BLOCK_EDG= (Color){ 200,  60,  60, 200 };
+    int inset = ts / 12; if (inset < 1) inset = 1;
+    int tw    = ts - inset * 2;
     for (int row = s_vp_row - 1; row < s_vp_row + vr + 1 && row < MAP_ROWS; row++) {
         if (row < 0) continue;
         for (int col = s_vp_col - 1; col < s_vp_col + vc + 1 && col < MAP_COLS; col++) {
             if (col < 0) continue;
-            if (col == s_hero_col && row == s_hero_row) continue;
-            if (s_cell_struct[row][col] >= 0) continue;
-            if (s_cell_flying_dst[row][col]) continue;   /* animated tile en-route */
-            /* 4px OLED-black gap; tile = outline border + terrain icon, no fill */
-            int   inset = ts / 10; if (inset < 2) inset = 2;
-            int   sx = (int)((col - s_vp_vis_col) * ts) + inset + gx;
-            int   sy = (int)((row - s_vp_vis_row) * ts) + inset + gy;
-            int   tw = ts - inset * 2;
-            Color c  = TERRAIN_COLOR[s_map[row][col]];
-            float bw = (float)(tw * 8 / 100); if (bw < 2.0f) bw = 2.0f;
+            int sx = (int)((col - s_vp_vis_col) * ts) + inset + gx;
+            int sy = (int)((row - s_vp_vis_row) * ts) + inset + gy;
+            bool block = s_obstacle[row][col];
+            DrawRectangle(sx, sy, tw, tw, block ? BLOCK : WALK);
             DrawRectangleLinesEx(
                 (Rectangle){ (float)sx, (float)sy, (float)tw, (float)tw },
-                bw, c);
-            int icx = sx + tw / 2;
-            int icy = sy + tw / 2;
-            int s   = tw / 3;
-            draw_terrain_icon(icx, icy, s, s_map[row][col], c);
+                1.5f, block ? BLOCK_EDG : WALK_EDG);
+            if (block) {
+                /* small X mark to read clearly as 'impassable' */
+                int m = tw / 4;
+                int cx = sx + tw / 2;
+                int cy = sy + tw / 2;
+                DrawLineEx((Vector2){ (float)(cx - m), (float)(cy - m) },
+                           (Vector2){ (float)(cx + m), (float)(cy + m) },
+                           2.0f, BLOCK_EDG);
+                DrawLineEx((Vector2){ (float)(cx + m), (float)(cy - m) },
+                           (Vector2){ (float)(cx - m), (float)(cy + m) },
+                           2.0f, BLOCK_EDG);
+            }
         }
-    }
-
-    /* Pass 2: draw each structure cell-by-cell (supports non-rectangular shapes) */
-    for (int i = 0; i < s_structure_count; i++) {
-        Structure *s = &s_structures[i];
-        /* cull off-screen via bounding box (expanded by 1 to match tile loop) */
-        if (s->col + s->w <= s_vp_col - 1 || s->col >= s_vp_col + vc + 1) continue;
-        if (s->row + s->h <= s_vp_row - 1 || s->row >= s_vp_row + vr + 1) continue;
-
-        Color col = STRUCT_COLOR[s->type];
-        int inset = ts / 10; if (inset < 2) inset = 2;
-        int tw    = ts - inset * 2;
-        Terrain st = STRUCT_TERRAIN[s->type];
-        for (int ci = 0; ci < s->cell_count; ci++) {
-            int ox = (int)((s->col + s->cell_dc[ci] - s_vp_vis_col) * ts) + inset + gx;
-            int oy = (int)((s->row + s->cell_dr[ci] - s_vp_vis_row) * ts) + inset + gy;
-            /* faint outer glow */
-            DrawRectangleRounded(
-                (Rectangle){ (float)(ox - 3), (float)(oy - 3),
-                             (float)(tw + 6), (float)(tw + 6) },
-                0.30f, 4, (Color){ col.r, col.g, col.b, 50 });
-            /* solid filled cell */
-            DrawRectangleRounded(
-                (Rectangle){ (float)ox, (float)oy, (float)tw, (float)tw },
-                0.20f, 4, col);
-            /* white terrain icon inside */
-            int icx = ox + tw / 2;
-            int icy = oy + tw / 2;
-            draw_terrain_icon(icx, icy, tw / 3, st, (Color){ 0, 0, 0, 140 });
-        }
-
-        /* Label centered on bounding box */
-        int sx = (int)((s->col - s_vp_vis_col) * ts) + gx;
-        int sy = (int)((s->row - s_vp_vis_row) * ts) + gy;
-        int bw = s->w * ts - 1;
-        int bh = s->h * ts - 1;
-        const char *label = STRUCT_LABEL[s->type];
-        int fs = ts * 34 / 100;
-        int lw = MeasureText(label, fs);
-        /* drop shadow then white label */
-        DrawText(label, sx + (bw - lw) / 2 + 1, sy + (bh - fs) / 2 + 1,
-                 fs, (Color){ 0, 0, 0, 140 });
-        DrawText(label, sx + (bw - lw) / 2, sy + (bh - fs) / 2,
-                 fs, (Color){ 255, 255, 255, 235 });
     }
 
     EndScissorMode();
@@ -1545,6 +1982,50 @@ static void draw_unit_glyph(float vis_col, float vis_row, float bump,
              fs, glyph_col);
 }
 
+/* Small horizontal HP bar above a tile (vis_col, vis_row). */
+static void draw_hp_bar(float vis_col, float vis_row, int hp, int max_hp)
+{
+    if (max_hp <= 0) return;
+    int ts = tile_px();
+    int gx = grid_x();
+    int gy = grid_y();
+    int sx = (int)((vis_col - s_vp_vis_col) * ts) + gx + ts / 8;
+    int sy = (int)((vis_row - s_vp_vis_row) * ts) + gy + 2;
+    int bw = ts - ts / 4;
+    int bh = (int)(ts * 0.10f); if (bh < 4) bh = 4;
+    float frac = (float)hp / (float)max_hp;
+    if (frac < 0.0f) frac = 0.0f;
+    if (frac > 1.0f) frac = 1.0f;
+    Color back = (Color){ 30, 20, 24, 220 };
+    Color front = frac > 0.6f ? (Color){  90, 230, 110, 255 }
+                : frac > 0.3f ? (Color){ 240, 210,  90, 255 }
+                              : (Color){ 235,  90,  90, 255 };
+    DrawRectangle(sx, sy, bw, bh, back);
+    DrawRectangle(sx, sy, (int)(bw * frac), bh, front);
+    DrawRectangleLines(sx, sy, bw, bh, (Color){ 10, 10, 14, 200 });
+    /* numeric overlay so exact HP is legible */
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d", hp);
+    int fs = bh + 2; if (fs < 10) fs = 10;
+    int lw = MeasureText(buf, fs);
+    DrawText(buf, sx + bw - lw - 2, sy - fs - 1, fs, (Color){ 240, 240, 240, 240 });
+}
+
+/* Small "+N" badge for a villain's damage bonus (drawn above the HP bar). */
+static void draw_dmg_bonus_badge(float vis_col, float vis_row, int bonus)
+{
+    if (bonus <= 0) return;
+    int ts = tile_px();
+    int gx = grid_x();
+    int gy = grid_y();
+    char buf[16];
+    snprintf(buf, sizeof(buf), "+%d", bonus);
+    int fs = (int)(ts * 0.22f); if (fs < 10) fs = 10;
+    int sx = (int)((vis_col - s_vp_vis_col) * ts) + gx + ts / 8;
+    int sy = (int)((vis_row - s_vp_vis_row) * ts) + gy - fs;
+    DrawText(buf, sx, sy, fs, (Color){ 255, 130, 90, 240 });
+}
+
 static void draw_units(void)
 {
     int ts = tile_px();
@@ -1552,110 +2033,161 @@ static void draw_units(void)
     int gy = grid_y();
     BeginScissorMode(gx, gy, VIEW_COLS * ts, VIEW_ROWS * ts);
 
-    /* Draw in priority order so players land on top of overlapping cells. */
-    for (int pass = 0; pass < 3; pass++) {
-        UnitKind want = (pass == 0) ? UNIT_PROTECTED
-                       : (pass == 1) ? UNIT_ENEMY
-                                     : UNIT_PLAYER;
+    /* Order: minions → villains → players, so players read on top. */
+    static const UnitKind order[] = {
+        UNIT_MINION,
+        UNIT_VILLAIN_STALKER, UNIT_VILLAIN_SWARMER,
+        UNIT_BRUTE, UNIT_ROGUE, UNIT_MAGE,
+    };
+    for (int p = 0; p < (int)(sizeof(order) / sizeof(order[0])); p++) {
+        UnitKind want = order[p];
         for (int i = 0; i < s_unit_count; i++) {
             Unit *u = &s_units[i];
             if (!u->alive || u->kind != want) continue;
+            const char *glyph = "?";
+            Color fill = (Color){ 255, 255, 255, 255 };
+            Color border = (Color){  40,  40,  60, 255 };
+            Color glow   = (Color){ 255, 255, 255,  60 };
+            Color gcol   = (Color){  20,  20,  20, 240 };
             switch (u->kind) {
-            case UNIT_PROTECTED:
-                draw_unit_glyph(u->vis_col, u->vis_row, u->bump, "P",
-                    (Color){ 255, 215,  80, 255 },
-                    (Color){ 180, 130,   0, 255 },
-                    (Color){ 255, 200,  60,  80 },
-                    (Color){  60,  35,   0, 230 });
+            case UNIT_BRUTE:
+                glyph = "B";
+                fill   = (Color){ 200, 220, 235, 255 };
+                border = (Color){  60, 100, 150, 255 };
+                glow   = (Color){ 150, 200, 255,  60 };
+                gcol   = (Color){  10,  30,  60, 240 };
                 break;
-            case UNIT_ENEMY:
-                draw_unit_glyph(u->vis_col, u->vis_row, u->bump, "E",
-                    (Color){ 220,  60,  60, 255 },
-                    (Color){ 110,  10,  10, 255 },
-                    (Color){ 255,  70,  70, 110 },
-                    (Color){  30,   0,   0, 240 });
+            case UNIT_ROGUE:
+                glyph = "R";
+                fill   = (Color){ 215, 160, 245, 255 };
+                border = (Color){ 110,  50, 170, 255 };
+                glow   = (Color){ 200, 100, 255,  70 };
+                gcol   = (Color){  40,   0,  60, 240 };
                 break;
-            case UNIT_PLAYER:
-                draw_unit_glyph(u->vis_col, u->vis_row, u->bump, "@",
-                    (Color){ 255, 255, 255, 255 },
-                    (Color){ 220,  80, 255, 255 },
-                    (Color){ 220, 100, 255,  60 },
-                    (Color){  40,   0,  60, 220 });
+            case UNIT_MAGE:
+                glyph = "M";
+                fill   = (Color){ 255, 200, 130, 255 };
+                border = (Color){ 200,  90,  30, 255 };
+                glow   = (Color){ 255, 160,  60,  70 };
+                gcol   = (Color){  60,  20,   0, 240 };
+                break;
+            case UNIT_VILLAIN_STALKER:
+                glyph = "V";
+                fill   = (Color){ 230,  60,  60, 255 };
+                border = (Color){ 110,  10,  10, 255 };
+                glow   = (Color){ 255,  70,  70, 110 };
+                gcol   = (Color){  30,   0,   0, 240 };
+                break;
+            case UNIT_VILLAIN_SWARMER:
+                glyph = "V";
+                fill   = (Color){ 220,  90, 140, 255 };
+                border = (Color){ 140,  20,  60, 255 };
+                glow   = (Color){ 250, 100, 160, 110 };
+                gcol   = (Color){  40,   0,  20, 240 };
+                break;
+            case UNIT_MINION:
+                glyph = "m";
+                fill   = (Color){ 200, 120, 120, 255 };
+                border = (Color){ 100,  40,  40, 255 };
+                glow   = (Color){ 240, 120, 120,  70 };
+                gcol   = (Color){  40,   0,   0, 240 };
                 break;
             default: break;
             }
+            draw_unit_glyph(u->vis_col, u->vis_row, u->bump, glyph,
+                             fill, border, glow, gcol);
+            draw_hp_bar(u->vis_col, u->vis_row, u->hp, u->max_hp);
+            if (IS_VILLAIN_KIND(u->kind) && u->damage_bonus > 0)
+                draw_dmg_bonus_badge(u->vis_col, u->vis_row, u->damage_bonus);
         }
     }
 
     EndScissorMode();
 }
 
-/* Draw a telegraph overlay on the targeted cell (origin_col + dc, origin_row + dr).
- * Also draws a thin arrow from the origin tile to the target tile. */
-static void draw_telegraph(int origin_col, int origin_row, int dc, int dr, Color col)
+/* Outline a cell at (col, row) in `col`. Used both for villain threat cells
+ * (with a damage label) and for player attack previews. */
+static void draw_cell_overlay(int col, int row, Color col_rgba, int label, float pulse)
 {
-    if (dc == 0 && dr == 0) return;
-    int tc = origin_col + dc;
-    int tr = origin_row + dr;
-    if (tc < 0 || tc >= MAP_COLS || tr < 0 || tr >= MAP_ROWS) return;
-
+    if (col < 0 || col >= MAP_COLS || row < 0 || row >= MAP_ROWS) return;
     int ts = tile_px();
     int gx = grid_x();
     int gy = grid_y();
-
-    /* Pulse 0..1 from continuous time for life. */
-    float t     = (float)GetTime();
-    float pulse = 0.55f + 0.45f * sinf(t * 6.0f);
-
-    int sx = (int)((tc - s_vp_vis_col) * ts) + gx;
-    int sy = (int)((tr - s_vp_vis_row) * ts) + gy;
+    int sx = (int)((col - s_vp_vis_col) * ts) + gx;
+    int sy = (int)((row - s_vp_vis_row) * ts) + gy;
     int tw = ts - 1;
-
-    /* Light fill (tints the unit underneath without obscuring it) plus a
-     * thick pulsing border so the cell reads clearly even on top of a tile. */
-    Color fill = (Color){ col.r, col.g, col.b, (unsigned char)(pulse * 90) };
-    Color edge = (Color){ col.r, col.g, col.b, 255 };
+    Color fill = (Color){ col_rgba.r, col_rgba.g, col_rgba.b, (unsigned char)(pulse * 90) };
+    Color edge = (Color){ col_rgba.r, col_rgba.g, col_rgba.b, 255 };
     DrawRectangleRounded((Rectangle){ (float)sx, (float)sy, (float)tw, (float)tw },
                          0.18f, 4, fill);
     DrawRectangleLinesEx((Rectangle){ (float)sx, (float)sy, (float)tw, (float)tw },
-                         4.0f + pulse * 2.0f, edge);
-
-    /* arrow from origin → target */
-    Vector2 a = tile_center_screen(origin_col, origin_row);
-    Vector2 b = tile_center_screen(tc, tr);
-    DrawLineEx(a, b, 3.0f, edge);
-    /* arrow head: small filled triangle perpendicular at b */
-    float head = ts * 0.22f;
-    float vx = (dc != 0) ? (float)dc : 0.0f;
-    float vy = (dr != 0) ? (float)dr : 0.0f;
-    /* perpendicular */
-    float px = -vy;
-    float py =  vx;
-    DrawTriangle(
-        (Vector2){ b.x,                    b.y                    },
-        (Vector2){ b.x - vx * head + px * head * 0.6f,
-                   b.y - vy * head + py * head * 0.6f },
-        (Vector2){ b.x - vx * head - px * head * 0.6f,
-                   b.y - vy * head - py * head * 0.6f },
-        edge);
+                         3.5f + pulse * 1.5f, edge);
+    if (label > 0) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d", label);
+        int fs = (int)(ts * 0.38f); if (fs < 12) fs = 12;
+        int lw = MeasureText(buf, fs);
+        /* shadow + text */
+        DrawText(buf, sx + (tw - lw) / 2 + 1, sy + (tw - fs) / 2 + 1, fs,
+                 (Color){ 0, 0, 0, 220 });
+        DrawText(buf, sx + (tw - lw) / 2,     sy + (tw - fs) / 2,     fs,
+                 (Color){ 255, 240, 240, 255 });
+    }
 }
 
-static void draw_telegraphs(void)
+/* Villain threat overlays: each villain's target list painted in red with
+ * the incoming damage number on every target cell. */
+static void draw_threats(void)
 {
     if (s_phase != PHASE_IDLE && s_phase != PHASE_DRAGGING) return;
     int ts = tile_px();
     int gx = grid_x();
     int gy = grid_y();
+    float pulse = 0.55f + 0.45f * sinf((float)GetTime() * 6.0f);
     BeginScissorMode(gx, gy, VIEW_COLS * ts, VIEW_ROWS * ts);
     for (int i = 0; i < s_unit_count; i++) {
-        Unit *u = &s_units[i];
-        if (!u->alive) continue;
-        if (u->tele_dc == 0 && u->tele_dr == 0) continue;
-        Color col = (u->kind == UNIT_ENEMY)
-                      ? (Color){ 230,  70,  70, 255 }
-                      : (Color){  70, 200, 255, 255 };
-        draw_telegraph(u->col, u->row, u->tele_dc, u->tele_dr, col);
+        Unit *v = &s_units[i];
+        if (!v->alive || !IS_VILLAIN_KIND(v->kind)) continue;
+        int n = s_villain_tgt_n[i];
+        int dmg = (v->kind == UNIT_VILLAIN_STALKER ? DMG_STALKER : DMG_SWARMER) + v->damage_bonus;
+        Color red = (v->kind == UNIT_VILLAIN_STALKER)
+                       ? (Color){ 230,  70,  70, 255 }
+                       : (Color){ 240,  90, 150, 255 };
+        for (int k = 0; k < n; k++)
+            draw_cell_overlay(s_villain_tgt_col[i][k], s_villain_tgt_row[i][k], red, dmg, pulse);
     }
+    EndScissorMode();
+}
+
+/* Player attack-preview cells for the actively-dragged player unit. */
+static void draw_player_previews(void)
+{
+    if (s_phase != PHASE_IDLE && s_phase != PHASE_DRAGGING) return;
+    if (s_active_player_idx < 0) return;
+    int idx = s_active_player_idx;
+    Unit *u = &s_units[idx];
+    if (!u->alive) return;
+    int ts = tile_px();
+    int gx = grid_x();
+    int gy = grid_y();
+    int cells_col[MAP_COLS + MAP_ROWS + ROGUE_PATH_MAX];
+    int cells_row[MAP_COLS + MAP_ROWS + ROGUE_PATH_MAX];
+    int n = 0;
+    Color tint = (Color){ 90, 200, 255, 255 };
+    if (u->kind == UNIT_BRUTE) {
+        n = compute_brute_cells(idx, cells_col, cells_row);
+        tint = (Color){ 130, 180, 255, 255 };
+    } else if (u->kind == UNIT_MAGE) {
+        n = compute_mage_cells(idx, cells_col, cells_row);
+        tint = (Color){ 255, 180,  90, 255 };
+    } else if (u->kind == UNIT_ROGUE) {
+        bool moved = (u->col != u->pre_drag_col || u->row != u->pre_drag_row);
+        n = compute_rogue_cells(idx, moved, cells_col, cells_row);
+        tint = (Color){ 200, 130, 255, 255 };
+    }
+    BeginScissorMode(gx, gy, VIEW_COLS * ts, VIEW_ROWS * ts);
+    for (int i = 0; i < n; i++)
+        draw_cell_overlay(cells_col[i], cells_row[i], tint, 0, 0.55f);
     EndScissorMode();
 }
 
@@ -1685,6 +2217,16 @@ static void draw_resolve_flash(void)
         DrawRectangleLinesEx((Rectangle){ (float)sx, (float)sy,
                                           (float)tw, (float)tw },
                              3.0f, (Color){ 255, 255, 255, a });
+        if (h->damage > 0) {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "-%d", h->damage);
+            int fs = (int)(ts * 0.40f); if (fs < 14) fs = 14;
+            int lw = MeasureText(buf, fs);
+            DrawText(buf, sx + (tw - lw) / 2 + 1, sy + (tw - fs) / 2 + 1, fs,
+                     (Color){ 0, 0, 0, a });
+            DrawText(buf, sx + (tw - lw) / 2,     sy + (tw - fs) / 2,     fs,
+                     (Color){ 255, 240, 240, a });
+        }
     }
     EndScissorMode();
 }
@@ -2147,35 +2689,28 @@ static void RealmWalkInit(void)
     s_player_lost = false;
     s_unit_count  = 0;
     s_active_player_idx = -1;
+    s_wave_index  = 1;
 
-    /* Interleaved spawn around the map centre: every enemy starts adjacent
-     * to at least one player or protected tile so the first round is
-     * already contested. Layout fits inside a 6x5 region (cols cx-3..cx+2,
-     * rows cy-2..cy+2). */
+    /* Compact spawn: 3 player units on the left, 2 villains on the right. */
     int cx = MAP_COLS / 2;
     int cy = MAP_ROWS / 2;
 
-    spawn_unit(UNIT_PLAYER,    cx - 3, cy - 2);
-    spawn_unit(UNIT_PLAYER,    cx - 1, cy - 1);
-    spawn_unit(UNIT_PLAYER,    cx + 2, cy + 1);
-    spawn_unit(UNIT_PLAYER,    cx - 2, cy + 2);
+    int keep_c[5] = { cx - 2, cx - 2, cx - 2, cx + 2, cx + 2 };
+    int keep_r[5] = { cy - 1, cy,     cy + 1, cy,     cy + 1 };
+    generate_obstacles(keep_c, keep_r, 5);
 
-    spawn_unit(UNIT_PROTECTED, cx + 1, cy - 2);
-    spawn_unit(UNIT_PROTECTED, cx - 1, cy    );
-    spawn_unit(UNIT_PROTECTED, cx    , cy    );
-    spawn_unit(UNIT_PROTECTED, cx + 1, cy + 2);
+    spawn_unit(UNIT_BRUTE,            cx - 2, cy - 1);
+    spawn_unit(UNIT_ROGUE,            cx - 2, cy    );
+    spawn_unit(UNIT_MAGE,             cx - 2, cy + 1);
+    spawn_unit(UNIT_VILLAIN_STALKER,  cx + 2, cy    );
+    spawn_unit(UNIT_VILLAIN_SWARMER,  cx + 2, cy + 1);
 
-    spawn_unit(UNIT_ENEMY,     cx - 2, cy - 2);
-    spawn_unit(UNIT_ENEMY,     cx + 2, cy - 2);
-    spawn_unit(UNIT_ENEMY,     cx    , cy - 1);
-    spawn_unit(UNIT_ENEMY,     cx + 2, cy    );
-    spawn_unit(UNIT_ENEMY,     cx - 1, cy + 1);
-    spawn_unit(UNIT_ENEMY,     cx - 1, cy + 2);
-
-    /* Legacy hero state seeded from the first player (the active player
-     * is rebound on tap). */
+    /* Legacy hero state seeded from the first player. */
     s_hero_col = s_units[0].col;
     s_hero_row = s_units[0].row;
+
+    for (int i = 0; i < MAX_UNITS; i++) s_villain_tgt_n[i] = 0;
+    s_rogue_path_n = 0;
 
     s_last_attack_count = 0;
     s_resolve_flash = 0.0f;
@@ -2232,10 +2767,9 @@ static void RealmWalkInit(void)
     s_prev_tc       = 0;
     s_prev_touch    = (Vector2){ -1.0f, -1.0f };
 
-    /* Round 0: enemy moves+telegraphs, then player rolls a random direction.
+    /* Round 0: villains plan their move + telegraph their attack list.
      * Player can then drag; on release we resolve. */
     enemy_plan_turn();
-    player_roll_random_telegraph();
 }
 
 static void RealmWalkUpdate(float dt)
@@ -2389,20 +2923,12 @@ static void draw_end_game(void)
 
     DrawRectangle(0, 0, sw, sh, (Color){ 0, 0, 0, 170 });
 
-    const char *title;
-    const char *subtitle;
-    Color       title_c;
-    if (s_player_won) {
-        title    = "VICTORY";
-        subtitle = "All enemies destroyed";
-        title_c  = (Color){ 100, 240, 100, 255 };
-    } else {
-        title    = "DEFEAT";
-        subtitle = (count_living(UNIT_PROTECTED) == 0)
-                       ? "All protected tiles lost"
-                       : "All player tiles lost";
-        title_c  = (Color){ 255,  80,  80, 255 };
-    }
+    const char *title   = "DEFEAT";
+    Color       title_c = (Color){ 255,  80,  80, 255 };
+    char        subtitle[64];
+    snprintf(subtitle, sizeof(subtitle), "Cleared %d wave%s",
+             s_wave_index - 1, (s_wave_index - 1) == 1 ? "" : "s");
+
     int tfs = sh / 9;
     int tw  = MeasureText(title, tfs);
     DrawText(title, (sw - tw) / 2, sh * 3 / 10, tfs, title_c);
@@ -2418,31 +2944,43 @@ static void draw_end_game(void)
     DrawText(hint, (sw - hw) / 2, sh * 7 / 10, hfs, (Color){ 140, 140, 150, 200 });
 }
 
+/* Find the first living unit of a given kind; returns -1 if none. */
+static int first_living_of_kind(UnitKind k)
+{
+    for (int i = 0; i < s_unit_count; i++)
+        if (s_units[i].alive && s_units[i].kind == k) return i;
+    return -1;
+}
+
 static void draw_hud_status(void)
 {
     int sw = GetScreenWidth();
     int sh = GetScreenHeight();
-    int fs = sh / 32;
-    if (fs < 14) fs = 14;
-    int pad = sw / 30;
+    int fs = sh / 36;
+    if (fs < 12) fs = 12;
+    int pad = sw / 40;
 
     DrawRectangle(0, 0, sw, fs * 2, (Color){ 0, 0, 0, 220 });
     DrawLine(0, fs * 2, sw, fs * 2, (Color){ 80, 200, 255, 160 });
 
-    int enemies   = count_living(UNIT_ENEMY);
-    int players   = count_living(UNIT_PLAYER);
-    int protectds = count_living(UNIT_PROTECTED);
+    int b_idx = first_living_of_kind(UNIT_BRUTE);
+    int r_idx = first_living_of_kind(UNIT_ROGUE);
+    int m_idx = first_living_of_kind(UNIT_MAGE);
+    int villains = count_living(UNIT_VILLAIN_STALKER) + count_living(UNIT_VILLAIN_SWARMER);
 
-    char left[64];
-    snprintf(left, sizeof(left), "P:%d  *:%d", players, protectds);
+    char left[96];
+    int bhp = b_idx >= 0 ? s_units[b_idx].hp : 0;
+    int rhp = r_idx >= 0 ? s_units[r_idx].hp : 0;
+    int mhp = m_idx >= 0 ? s_units[m_idx].hp : 0;
+    snprintf(left, sizeof(left), "B:%d  R:%d  M:%d", bhp, rhp, mhp);
     DrawText(left, pad, fs / 2, fs, (Color){ 220, 230, 240, 240 });
 
-    char right[32];
-    snprintf(right, sizeof(right), "E:%d", enemies);
+    char right[64];
+    snprintf(right, sizeof(right), "V:%d   W:%d", villains, s_wave_index);
     int rw = MeasureText(right, fs);
     DrawText(right, sw - pad - rw, fs / 2, fs,
-             enemies ? (Color){ 240, 110, 110, 240 }
-                     : (Color){ 100, 240, 130, 240 });
+             villains ? (Color){ 240, 110, 110, 240 }
+                      : (Color){ 100, 240, 130, 240 });
 }
 
 static void RealmWalkDraw(void)
@@ -2451,10 +2989,10 @@ static void RealmWalkDraw(void)
     draw_map_tiles();
     draw_flying_tiles();
     draw_units();
-    /* Telegraphs and the resolve flash render on top of units so the
-     * player can always see which cells are about to be hit, even when
-     * the targeted cell currently holds a tile they're dragging. */
-    draw_telegraphs();
+    /* Threats and previews render on top so the targeted cell reads clearly
+     * even when a unit is currently standing on it. */
+    draw_player_previews();
+    draw_threats();
     draw_resolve_flash();
     draw_nav_buttons();
     draw_hud_status();
@@ -2469,7 +3007,7 @@ static void RealmWalkDeinit(void)
 
 const Prototype RealmWalkProto = {
     .name        = "Realm Walk",
-    .description = "Drag the player so its attack hits the enemy. Protect the gold tile.",
+    .description = "Brute, Rogue, Mage vs endless villain waves. Drag one player; everyone fights.",
     .Init        = RealmWalkInit,
     .Update      = RealmWalkUpdate,
     .Draw        = RealmWalkDraw,
