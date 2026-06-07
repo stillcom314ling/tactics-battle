@@ -4,6 +4,7 @@
 
 #include "../prototypes/balls/balls.h"
 #include "../prototypes/drag_disp/drag_disp.h"
+#include "../prototypes/drag_disp_draft/drag_disp_draft.h"
 #include "../prototypes/triad/triad.h"
 #include "../prototypes/realm-walk/realm_walk.h"
 #include "../prototypes/pool/pool.h"
@@ -21,6 +22,7 @@
 static const Prototype * const PROTOTYPES[] = {
     &BallsProto,
     &DragDispProto,
+    &DragDispDraftProto,
     &TriadProto,
     &RealmWalkProto,
     &PoolProto,
