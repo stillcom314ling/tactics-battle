@@ -8,6 +8,7 @@
 #include "../prototypes/triad/triad.h"
 #include "../prototypes/realm-walk/realm_walk.h"
 #include "../prototypes/pool/pool.h"
+#include "../prototypes/rift_wizard/rift_wizard.h"
 
 #ifdef PLATFORM_WEB
 #include <emscripten/emscripten.h>
@@ -26,6 +27,7 @@ static const Prototype * const PROTOTYPES[] = {
     &TriadProto,
     &RealmWalkProto,
     &PoolProto,
+    &RiftWizardProto,
 };
 static const int PROTO_COUNT = (int)(sizeof(PROTOTYPES) / sizeof(PROTOTYPES[0]));
 
