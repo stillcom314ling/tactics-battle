@@ -27,5 +27,11 @@ jobs:
           wget -q -O vendor/raygui.h \
             https://raw.githubusercontent.com/raysan5/raygui/4.0/src/raygui.h
 
+      - name: Unit tests (Orbfall resolver + damage pipeline)
+        run: make test-orbfall
+
+      - name: Headless smoke test (Orbfall game loop)
+        run: make test-orbfall-smoke
+
       - name: Build
         run: make

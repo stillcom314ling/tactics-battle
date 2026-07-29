@@ -23,7 +23,7 @@ PROTO_SRCS := $(wildcard prototypes/*/*.c)
 
 SRCS := $(CORE_SRCS) $(PROTO_SRCS)
 
-.PHONY: all clean list-protos
+.PHONY: all clean list-protos test-orbfall test-orbfall-smoke
 
 all: dist/index.html
 
@@ -35,6 +35,27 @@ dist:
 
 clean:
 	rm -rf dist
+
+# Native unit tests for the Orbfall resolver and damage pipeline
+test-orbfall:
+	mkdir -p build-tests
+	cc -std=c99 -Wall prototypes/orbfall/resolve.c \
+	   prototypes/orbfall/tests/test_resolve.c -o build-tests/test_resolve
+	cc -std=c99 -Wall -Wno-missing-field-initializers \
+	   prototypes/orbfall/resolve.c prototypes/orbfall/content.c \
+	   prototypes/orbfall/tests/test_content.c -o build-tests/test_content -lm
+	./build-tests/test_resolve
+	./build-tests/test_content
+
+# Headless whole-game smoke test (needs raylib headers, see CI/local setup)
+test-orbfall-smoke:
+	mkdir -p build-tests
+	cc -std=c99 -g -Wall -Wno-missing-field-initializers \
+	   -I$(RAYLIB)/include -Ivendor -Isrc -Iprototypes \
+	   prototypes/orbfall/orbfall.c prototypes/orbfall/resolve.c \
+	   prototypes/orbfall/content.c prototypes/orbfall/tests/stub_raylib.c \
+	   prototypes/orbfall/tests/smoke_test.c -o build-tests/smoke -lm
+	./build-tests/smoke
 
 # Convenience target: list discovered prototype source files
 list-protos:
