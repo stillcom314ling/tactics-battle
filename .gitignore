@@ -1,4 +1,7 @@
 node_modules/
 dist/
+build-tests/
+raylib-5.5_webassembly/
+raylib-5.5_webassembly.zip
 .DS_Store
 *.local
