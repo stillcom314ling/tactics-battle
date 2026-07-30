@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="assets/style.css">
 <title>Phone Cast for Kobo — one file, one drop</title>
 <meta name="description" content="A single KoboRoot.tgz that installs KOReader and a plugin that puts whatever is on your phone onto your Kobo's screen over Wi-Fi.">
 </head>
@@ -26,7 +27,7 @@
   </p>
 
   <figure class="panel" aria-labelledby="panel-caption">
-    <canvas id="panel-canvas" width="316" height="421" role="img"
+    <canvas id="panel-canvas" width="284" height="384" role="img"
             aria-label="A phone screenshot rendered as it appears on a Kobo's e-ink panel: one-bit black and white, dithered."></canvas>
     <figcaption id="panel-caption">What arrives on the panel: dithered to one bit, full screen.</figcaption>
   </figure>
@@ -101,7 +102,7 @@
       <span class="download-note" id="build-status">Writes <code>phonecast.koplugin</code> and nothing else.</span>
     </p>
   </form>
-  <noscript><p class="aside">This builder needs JavaScript. Without it, use the full bundle above — it carries the plugin with default settings.</p></noscript>
+  <noscript><style>.panel{display:none}</style><p class="aside">This builder needs JavaScript. Without it, use the full bundle above — it carries the plugin with default settings.</p></noscript>
 </section>
 
 <section class="trouble">
@@ -125,9 +126,12 @@
   <h2>What's in the file</h2>
   <p>Upstream <a href="https://github.com/koreader/koreader">KOReader</a> and
   <a href="https://github.com/NiLuJe/KFMon">KFMon</a> exactly as they ship, plus
-  <code>phonecast.koplugin</code>. Nothing else is touched: every path in the archive is
-  under <code>.adds/</code>, so your books, settings and the Kobo's own firmware are left
-  where they are. Resolved upstream versions are listed on each
+  <code>phonecast.koplugin</code>. Your books and settings are never written to.</p>
+  <p>KFMon is the launcher — the standard way KOReader starts on a Kobo. It is the only
+  part that lands outside <code>.adds/</code>: it adds <code>/usr/local/kfmon/</code> and a
+  udev rule, and it replaces one firmware script, <code>/etc/init.d/on-animator.sh</code>.
+  Nothing else in the firmware is touched, and <code>.kobo/</code> is never written to.
+  Resolved upstream versions are listed on each
   <a href="https://github.com/stillcom314ling/tactics-battle/releases">release</a>.</p>
 </section>
 

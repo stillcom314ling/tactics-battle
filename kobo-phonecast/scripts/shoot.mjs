@@ -84,6 +84,31 @@ const weight = await pm.evaluate(async () => {
 });
 await cm.close();
 
+/* No hue -- acceptance criterion 7. Read off the computed styles of every
+ * element rather than the stylesheet, so a colour that arrives from anywhere
+ * still has to sit on the gray axis. */
+const { page: ph, ctx: ch } = await shoot("hue-probe", 1280, 900, { settle: 700 });
+const hues = await ph.evaluate(() => {
+    const props = ["color", "backgroundColor", "borderTopColor", "borderBottomColor",
+        "borderLeftColor", "borderRightColor", "outlineColor", "textDecorationColor"];
+    const bad = [];
+    for (const el of document.querySelectorAll("*")) {
+        const cs = getComputedStyle(el);
+        for (const p of props) {
+            const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(cs[p] || "");
+            if (!m) continue;
+            const [r, g, b] = [+m[1], +m[2], +m[3]];
+            if (Math.max(r, g, b) - Math.min(r, g, b) > 0) {
+                bad.push(`${el.tagName.toLowerCase()}.${el.className || ""} ${p}: ${cs[p]}`);
+            }
+        }
+    }
+    return [...new Set(bad)];
+});
+await ch.close();
+await import("node:fs/promises").then(({ unlink }) =>
+    unlink(join(root, "screenshots", `${label}-hue-probe.png`)).catch(() => {}));
+
 /* No-JS -- acceptance criterion 6. */
 const { page: pn, ctx: cn } = await shoot("360-nojs", 360, 640, { js: false, settle: 200 });
 const nojs = await pn.evaluate(() => ({
@@ -103,12 +128,15 @@ console.log(`  install steps: ${steps.length} (limit 6), longest ${longest} word
 steps.forEach((s, i) => console.log(`    ${i + 1}. [${String(s.split(/\s+/).length).padStart(2)}w] ${s}`));
 console.log(`  page weight, HTML + CSS + JS: ${(weight / 1024).toFixed(1)} KB uncompressed`);
 console.log(`  no-JS: ${nojs.steps} steps present, full bundle href ${nojs.href ? "present" : "MISSING"}`);
+console.log(`  colour: ${hues.length ? hues.length + " off-axis value(s)" : "every computed colour is on the gray axis"}`);
+hues.forEach((h) => console.log(`    ${h}`));
 
 const problems = [];
 if (fold.bottom > 640) problems.push("download control is below the fold at 360x640");
 if (steps.length > 6) problems.push(`${steps.length} install steps, limit is 6`);
 if (longest > 25) problems.push(`longest step is ${longest} words, limit is 25`);
 if (nojs.steps !== steps.length || !nojs.href) problems.push("page degrades badly without JavaScript");
+if (hues.length) problems.push(`${hues.length} computed colour(s) carry hue`);
 if (problems.length) {
     console.error("\nFAIL: " + problems.join("; "));
     process.exit(1);
