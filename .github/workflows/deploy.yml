@@ -41,6 +41,16 @@ jobs:
       - name: Build
         run: make
 
+      # The kobo-phonecast install page is static; publish it alongside the
+      # launcher at /kobo-phonecast/ rather than giving it its own Pages site,
+      # since a repository only gets one.
+      - name: Stage the kobo-phonecast install page
+        run: |
+          node kobo-phonecast/scripts/embed-plugin.mjs --check
+          mkdir -p dist/kobo-phonecast/assets
+          cp kobo-phonecast/index.html dist/kobo-phonecast/
+          cp kobo-phonecast/assets/*.js kobo-phonecast/assets/*.css dist/kobo-phonecast/assets/
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist/

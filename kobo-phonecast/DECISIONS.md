@@ -95,3 +95,10 @@ which fails the prime directive completely. So:
 - **The wide layout is a single 46rem column, not text beside the panel.** The
   two-column version left the right half of the page empty below the hero, which
   reads as unfinished. Screenshot at `screenshots/m3-styled-1280.png`.
+
+## Deployment
+
+- **The install page is published under `/kobo-phonecast/` on the host repo's
+  existing Pages site, not its own.** A repository gets one Pages site, and the
+  root `deploy.yml` already owns it for the raylib launcher. A copy step there
+  stages the static files alongside it; the raylib build is untouched.
