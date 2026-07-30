@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phone Cast for Kobo — one file, one drop</title>
+<meta name="description" content="A single KoboRoot.tgz that installs KOReader and a plugin that puts whatever is on your phone onto your Kobo's screen over Wi-Fi.">
+</head>
+<body>
+
+<header class="masthead">
+  <p class="wordmark">Phone Cast <span class="wordmark-sub">for Kobo</span></p>
+</header>
+
+<main>
+
+<section class="hero">
+  <h1>Send your phone's screen to your Kobo.</h1>
+  <p class="standfirst">One file. Drop it on the device, wait for the reboot, done.</p>
+
+  <p class="download">
+    <a class="button" href="https://github.com/stillcom314ling/tactics-battle/releases/latest/download/KoboRoot.tgz" download>
+      Download <code>KoboRoot.tgz</code>
+    </a>
+    <span class="download-note">KOReader and Phone Cast, ready to run.</span>
+  </p>
+
+  <figure class="panel" aria-labelledby="panel-caption">
+    <canvas id="panel-canvas" width="316" height="421" role="img"
+            aria-label="A phone screenshot rendered as it appears on a Kobo's e-ink panel: one-bit black and white, dithered."></canvas>
+    <figcaption id="panel-caption">What arrives on the panel: dithered to one bit, full screen.</figcaption>
+  </figure>
+</section>
+
+<section class="install">
+  <h2>Install</h2>
+  <p class="prereq">You need a USB cable that carries data, not only power.</p>
+
+  <ol class="steps">
+    <li>Download <code>KoboRoot.tgz</code> above.</li>
+    <li>Plug the Kobo into a computer. Tap <b>Connect</b> on the Kobo when it asks.</li>
+    <li>Open the drive named <code>KOBO</code>. Show hidden files, then open the folder <code>.kobo</code>.</li>
+    <li>Copy <code>KoboRoot.tgz</code> into <code>.kobo</code>. Do not unzip it, do not rename it.</li>
+    <li>Eject the drive safely, then unplug the cable.</li>
+    <li>The Kobo reboots and installs itself. Give it a minute. It restarts into KOReader.</li>
+  </ol>
+
+  <p class="aside">Hidden files: <b>Windows</b> — View → Show → Hidden items. <b>macOS</b> — <kbd>⌘</kbd><kbd>⇧</kbd><kbd>.</kbd> in Finder.</p>
+</section>
+
+<section class="using">
+  <h2>Then, from your phone</h2>
+  <ol class="steps steps-secondary">
+    <li>On the Kobo: the <b>wrench</b> menu → <b>Phone Cast</b> → <b>Start listening</b>.</li>
+    <li>It brings Wi-Fi up and shows a URL like <code>http://192.168.1.50:8080</code>.</li>
+    <li>Open that URL on your phone and use the upload form. The image appears on the Kobo.</li>
+  </ol>
+  <p>That form is the whole phone side — nothing to install. If you'd rather push a
+  screenshot without opening a browser, point Tasker's <b>HTTP Request</b> action or an
+  iOS <b>Shortcut</b> at <code>/upload</code>: <code>POST</code>, the image as the raw
+  body, <code>Content-Type: image/png</code>. Give the Kobo a DHCP reservation first, or
+  its address will move.</p>
+</section>
+
+<section class="nowireless">
+  <h2>Why the cable</h2>
+  <p><code>KoboRoot.tgz</code> has to land in <code>/mnt/onboard/.kobo/</code> on internal
+  storage, and stock Kobo firmware runs nothing that will accept a file over the network.
+  An external microSD card doesn't help either, because that folder isn't on it — so there
+  is no wireless install, and looking for one costs an hour.</p>
+</section>
+
+<section class="plugin-only">
+  <h2>Already have KOReader?</h2>
+  <p>Take the plugin on its own. It's built here in the browser, so the settings you pick
+  are baked into the file you get. Same install: copy it into <code>.kobo</code>, eject, reboot.</p>
+
+  <form id="plugin-form" class="settings">
+    <div class="field">
+      <label for="f-port">Port</label>
+      <input id="f-port" name="port" type="number" value="8080" min="1" max="65535" inputmode="numeric">
+    </div>
+    <div class="field">
+      <label for="f-keep">Images kept</label>
+      <input id="f-keep" name="keep" type="number" value="30" min="1" max="9999" inputmode="numeric">
+    </div>
+    <div class="field">
+      <label for="f-poll">Poll seconds</label>
+      <input id="f-poll" name="poll" type="number" value="1" min="1" max="60" inputmode="numeric">
+    </div>
+    <div class="field">
+      <label for="f-max">Max upload, MB</label>
+      <input id="f-max" name="max_body" type="number" value="32" min="1" max="512" inputmode="numeric">
+    </div>
+    <div class="field field-wide">
+      <label for="f-dir">Save folder</label>
+      <input id="f-dir" name="save_dir" type="text" placeholder="KOReader's own data folder" spellcheck="false">
+    </div>
+    <p class="download">
+      <button class="button" id="build" type="submit">Build plugin <code>KoboRoot.tgz</code></button>
+      <span class="download-note" id="build-status">Writes <code>phonecast.koplugin</code> and nothing else.</span>
+    </p>
+  </form>
+  <noscript><p class="aside">This builder needs JavaScript. Without it, use the full bundle above — it carries the plugin with default settings.</p></noscript>
+</section>
+
+<section class="trouble">
+  <h2>If something goes wrong</h2>
+  <dl class="faq">
+    <dt>The Kobo never reboots after ejecting.</dt>
+    <dd>The file landed somewhere other than <code>.kobo</code>, or the cable is power-only. Both look identical from the outside.</dd>
+
+    <dt>No Phone Cast entry in the menu.</dt>
+    <dd>KOReader is running but didn't load the plugin. Restart it: top menu → <b>Exit</b> → <b>Restart</b>.</dd>
+
+    <dt>Nothing happens when the phone uploads.</dt>
+    <dd>Phone and Kobo are on different networks, or the router isolates clients on its guest network.</dd>
+
+    <dt>It stops working after a few minutes.</dt>
+    <dd>The Kobo suspended and took Wi-Fi with it. Press the power button before sending, or raise the sleep timeout in KOReader's power settings.</dd>
+  </dl>
+</section>
+
+<section class="whats-inside">
+  <h2>What's in the file</h2>
+  <p>Upstream <a href="https://github.com/koreader/koreader">KOReader</a> and
+  <a href="https://github.com/NiLuJe/KFMon">KFMon</a> exactly as they ship, plus
+  <code>phonecast.koplugin</code>. Nothing else is touched: every path in the archive is
+  under <code>.adds/</code>, so your books, settings and the Kobo's own firmware are left
+  where they are. Resolved upstream versions are listed on each
+  <a href="https://github.com/stillcom314ling/tactics-battle/releases">release</a>.</p>
+</section>
+
+</main>
+
+<footer>
+  <p><a href="https://github.com/stillcom314ling/tactics-battle/tree/main/kobo-phonecast">Source</a> · The plugin is ~300 lines of Lua; read it before you run it as root.</p>
+</footer>
+
+<script src="assets/fflate.min.js"></script>
+<script src="assets/tar.js"></script>
+<script src="assets/plugin-files.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>
