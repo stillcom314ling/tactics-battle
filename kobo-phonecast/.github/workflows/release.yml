@@ -1,0 +1,70 @@
+name: Release KoboRoot.tgz
+
+# Tag push builds the full bundle from whatever upstream currently ships and
+# attaches it to the release. Asset names are resolved from the releases API,
+# never hardcoded -- upstream has renamed them before.
+#
+# NOTE: GitHub only runs workflows from .github/workflows at the repository
+# root. This project lives in a subdirectory, so copy this file to
+# .github/workflows/kobo-phonecast-release.yml at the root to make it fire.
+
+on:
+  push:
+    tags:
+      - "phonecast-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    working-directory: kobo-phonecast
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # The plugin bundle first: it is the artifact the page generates, and if
+      # the tar writer is wrong nothing downstream is worth building.
+      - name: Verify the client-side plugin bundle
+        run: ./scripts/verify-bundle.sh
+
+      - name: Build the full bundle
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/build-full-bundle.py --out dist/KoboRoot.tgz --notes dist/notes.md
+
+      # Reads the finished file back, from the artifact alone.
+      - name: Verify the full bundle
+        run: python3 scripts/verify-full-bundle.py dist/KoboRoot.tgz
+
+      - name: Record what shipped
+        run: |
+          tar tzvf dist/KoboRoot.tgz > dist/KoboRoot.tar-tzvf.txt
+          sha256sum dist/KoboRoot.tgz | tee dist/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kobo-phonecast-bundle
+          path: |
+            kobo-phonecast/dist/KoboRoot.tgz
+            kobo-phonecast/dist/KoboRoot.tar-tzvf.txt
+            kobo-phonecast/dist/notes.md
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "Phone Cast ${GITHUB_REF_NAME}" \
+            --notes-file dist/notes.md \
+            dist/KoboRoot.tgz dist/KoboRoot.tar-tzvf.txt dist/SHA256SUMS
