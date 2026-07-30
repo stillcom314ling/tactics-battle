@@ -18,8 +18,15 @@ local MAX_BODY = 32 * 1024 * 1024
 local SAVE_DIR = require("datastorage"):getDataDir() .. "/cast"
 
 do
-    local dir = debug.getinfo(1, "S").source:match("@?(.*/)")
-    local ok, cfg = pcall(dofile, dir .. "config.lua")
+    -- Everything here is inside the pcall, including working out where this
+    -- file lives: source carries no directory when the plugin is loaded by a
+    -- relative path, and a nil there would take the whole plugin down at load
+    -- time rather than just falling back to the defaults.
+    local ok, cfg = pcall(function()
+        local src = debug.getinfo(1, "S").source or ""
+        local dir = src:match("@?(.*[/\\])") or "./"
+        return dofile(dir .. "config.lua")
+    end)
     if ok and type(cfg) == "table" then
         PORT = tonumber(cfg.port) or PORT
         POLL = tonumber(cfg.poll) or POLL

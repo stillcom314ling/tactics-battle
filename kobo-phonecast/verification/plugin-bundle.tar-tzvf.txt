@@ -3,5 +3,5 @@
 
 drwxr-xr-x root/root         0 2025-01-01 00:00 mnt/onboard/.adds/koreader/plugins/phonecast.koplugin/
 -rw-r--r-- root/root       186 2025-01-01 00:00 mnt/onboard/.adds/koreader/plugins/phonecast.koplugin/_meta.lua
--rw-r--r-- root/root     10143 2025-01-01 00:00 mnt/onboard/.adds/koreader/plugins/phonecast.koplugin/main.lua
+-rw-r--r-- root/root     10516 2025-01-01 00:00 mnt/onboard/.adds/koreader/plugins/phonecast.koplugin/main.lua
 -rw-r--r-- root/root       243 2025-01-01 00:00 mnt/onboard/.adds/koreader/plugins/phonecast.koplugin/config.lua
