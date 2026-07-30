@@ -1,0 +1,7 @@
+# tar tzvf of a plugin bundle generated with default settings
+# regenerate: node scripts/generate-bundle.mjs out.tgz && tar tzvf out.tgz
+
+drwxr-xr-x root/root         0 2025-01-01 00:00 mnt/onboard/.adds/koreader/plugins/phonecast.koplugin/
+-rw-r--r-- root/root       186 2025-01-01 00:00 mnt/onboard/.adds/koreader/plugins/phonecast.koplugin/_meta.lua
+-rw-r--r-- root/root     10516 2025-01-01 00:00 mnt/onboard/.adds/koreader/plugins/phonecast.koplugin/main.lua
+-rw-r--r-- root/root       243 2025-01-01 00:00 mnt/onboard/.adds/koreader/plugins/phonecast.koplugin/config.lua
